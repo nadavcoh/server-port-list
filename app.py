@@ -9,7 +9,7 @@ PORT = 80
 ANNOTATIONS_FILE = 'annotations.csv'
 
 def load_annotations():
-    """Loads annotations from the CSV file, keyed by PID."""
+    """Loads annotations from the CSV file, keyed by a tuple of (PID, port)."""
     annotations = {}
     if not os.path.exists(ANNOTATIONS_FILE):
         return annotations
@@ -25,11 +25,11 @@ def load_annotations():
     return annotations
 
 def save_annotations(servers):
-    """Saves the current server list (with annotations) to the CSV file."""
+    """Saves the current server list (with annotations and cwd) to the CSV file."""
     try:
         with open(ANNOTATIONS_FILE, mode='w', newline='', encoding='utf-8') as csvfile:
-            # Added 'annotation' to fieldnames
-            fieldnames = ['process', 'pid', 'cmdline', 'ip', 'port', 'annotation']
+            # Added 'cwd' to fieldnames
+            fieldnames = ['process', 'pid', 'cmdline', 'cwd', 'ip', 'port', 'annotation']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
             writer.writerows(servers)
@@ -51,17 +51,23 @@ def get_listening_ports():
             
             # Use a composite identifier to avoid duplicates
             identifier = (port_str, pid_str)
+
             if identifier not in seen:
                 seen.add(identifier)
                 
+                process_name, cmdline, cwd = "System/Unknown", "N/A", "N/A"
                 try:
                     p = psutil.Process(conn.pid)
                     process_name = p.name()
                     # Join command-line arguments into a string, escaping for HTML
                     cmdline = ' '.join(map(html.escape, p.cmdline()))
+                    # Get current working directory
+                    try:
+                        cwd = html.escape(p.cwd())
+                    except psutil.AccessDenied:
+                        cwd = "Access Denied"
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    process_name = "System/Unknown"
-                    cmdline = "N/A"
+                    pass # Keep default values
 
                 # Get annotation from the loaded data
                 annotation = annotations.get(identifier, "")
@@ -72,7 +78,8 @@ def get_listening_ports():
                     'pid': pid_str,
                     'process': process_name,
                     'cmdline': cmdline,
-                    'annotation': annotation # Add annotation to the server dict
+                    'cwd': cwd, # Add working directory
+                    'annotation': annotation
                 })
 
     # Sort by port number for better readability
@@ -92,14 +99,16 @@ def generate_html(servers, request_host):
         <style>
             body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f4f9; color: #333; padding: 20px; }
             h1 { color: #005a9e; }
-            table { border-collapse: collapse; width: 100%; background-color: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-            th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+            table { table-layout: fixed; border-collapse: collapse; width: 100%; background-color: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            th, td { border: 1px solid #ddd; padding: 12px; text-align: left; word-wrap: break-word; }
             th { background-color: #0078d7; color: white; }
             tr:nth-child(even) { background-color: #f2f2f2; }
             tr:hover { background-color: #e1f0fa; }
             a { color: #0078d7; text-decoration: none; font-weight: bold; }
             a:hover { text-decoration: underline; }
-            .cmdline { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'Courier New', monospace; font-size: 0.9em; color: #555; }
+            .ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .cmdline { max-width: 300px; }
+            .cwd { max-width: 300px; }
             .annotation { max-width: 250px; }
         </style>
     </head>
@@ -108,12 +117,13 @@ def generate_html(servers, request_host):
         <p>This list is generated dynamically. Annotations are read from and saved to <code>annotations.csv</code> in the same directory.</p>
         <table>
             <tr>
-                <th>Process Name</th>
-                <th>PID</th>
-                <th>Arguments</th>
-                <th>Annotation</th>
-                <th>Local IP Bind</th>
-                <th>Port / Link</th>
+                <th style="width: 12%;">Process Name</th>
+                <th style="width: 5%;">PID</th>
+                <th style="width: 20%;">Arguments</th>
+                <th style="width: 20%;">Working Directory</th>
+                <th style="width: 15%;">Annotation</th>
+                <th style="width: 10%;">Local IP</th>
+                <th style="width: 8%;">Port</th>
             </tr>
     """
     
@@ -136,12 +146,13 @@ def generate_html(servers, request_host):
         
         html_content += f"""
             <tr>
-                <td>{s['process']}</td>
+                <td class="ellipsis" title="{s['process']}">{s['process']}</td>
                 <td>{s['pid']}</td>
-                <td class="cmdline" title="{s['cmdline']}">{s['cmdline']}</td>
+                <td class="ellipsis cmdline" title="{s['cmdline']}">{s['cmdline']}</td>
+                <td class="ellipsis cwd" title="{s['cwd']}">{s['cwd']}</td>
                 <td class="annotation">{annotation_display}</td>
                 <td>{ip}</td>
-                <td><a href="{link}" target="_blank">Port {port}</a></td>
+                <td><a href="{link}" target="_blank">{port}</a></td>
             </tr>
         """
         
