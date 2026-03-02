@@ -171,91 +171,291 @@ def get_favicon_url(link):
     return None
 
 def generate_html(config, servers, request_host):
-    """Compiles the gathered data into an HTML page, respecting display settings."""
+    """Renders servers as a visual app-picker / home-screen grid."""
     base_host = request_host.split(':')[0] if request_host else "localhost"
-    hidden_cols = config.get('hide_columns', set())
 
-    # Define all possible columns
-    columns = {
-        'icon': ('Icon', '5%'), 'status': ('Status', '10%'), 'process': ('Process Name', '12%'), 'pid': ('PID', '5%'),
-        'arguments': ('Arguments', '20%'), 'working dir': ('Working Dir', '15%'),
-        'annotation': ('Annotation', '15%'), 'local ip': ('Local IP', '8%'),
-        'port / links': ('Port / Links', '15%')
-    }
-    
-    html_content = f"""
-    <!DOCTYPE html><html><head><title>Dynamic Windows Server Port List</title>
-    <style>
-        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f4f9; color: #333; padding: 20px; }}
-        h1 {{ color: #005a9e; }} p {{ font-size: 0.9em; color: #555; }}
-        table {{ table-layout: fixed; border-collapse: collapse; width: 100%; background-color: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-        th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; word-wrap: break-word; }}
-        th {{ background-color: #0078d7; color: white; }}
-        tr:nth-child(even) {{ background-color: #f2f2f2; }} tr:hover {{ background-color: #e1f0fa; }}
-        .not-running {{ color: #888; background-color: #fafafa; }}
-        .not-running a {{ color: #aaa; pointer-events: none; text-decoration: line-through; }}
-        a {{ color: #0078d7; text-decoration: none; font-weight: bold; }} a:hover {{ text-decoration: underline; }}
-        .ellipsis {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-    </style></head><body>
-    <h1>Active Listening Ports</h1>
-    <p>Control visibility and links by editing <code>{ANNOTATIONS_FILE}</code>.
-       To hide columns, add a row with '##CONFIG##' in the 'process' column and a comma-separated list of column names in the 'annotation' field.
-       Valid columns are: {', '.join(columns.keys())}.
-    </p>
-    <table><tr>
-    """
-    
-    # Generate table headers, respecting hidden columns
-    for key, (name, width) in columns.items():
-        if key.lower() not in hidden_cols:
-            html_content += f'<th style="width: {width};">{name}</th>'
-    html_content += "</tr>"
-
+    cards_html = ""
     for s in servers:
-        status = s.get('status', 'N/A')
-        row_class = 'not-running' if status == 'Not Running' else ''
-        
-        links_html = html.escape(s.get('port', ''))
-        favicon_html = ""
-        if status == 'Running':
-            link_host = "localhost" if s.get('ip') in ["127.0.0.1", "::1"] else base_host
-            protocol = s.get('protocol', '').lower()
+        status   = s.get('status', 'N/A')
+        running  = status == 'Running'
+        port     = s.get('port', '')
+        protocol = s.get('protocol', '').lower()
+        ip       = s.get('ip', '')
+        label    = html.escape(s.get('annotation') or s.get('process', 'Unknown'))
+        process  = html.escape(s.get('process', ''))
+        pid      = html.escape(s.get('pid', ''))
+        cmdline  = html.escape(s.get('cmdline', ''))
+        cwd      = html.escape(s.get('cwd', ''))
 
-            if protocol in ['http', 'https']:
-                link = f"{protocol}://{link_host}:{s.get('port')}"
-                links_html = f'<a href="{link}" target="_blank">{s.get("port")}</a> ({protocol})'
-                # Skip icon lookup for hidden rows
+        link_host = "localhost" if ip in ["127.0.0.1", "::1"] else base_host
+        favicon_url = None
+        primary_link = ""
+        proto_badge = ""
+
+        if running:
+            if protocol in ('http', 'https'):
+                primary_link = f"{protocol}://{link_host}:{port}"
+                # Use cached iconurl, otherwise fetch
                 if s.get('hidden', '').lower() != 'true':
-                    # Use cached iconurl from CSV if available, otherwise fetch and cache it
-                    favicon_url = s.get('iconurl') or get_favicon_url(link)
+                    favicon_url = s.get('iconurl') or get_favicon_url(primary_link)
                     if favicon_url:
-                        s['iconurl'] = favicon_url  # cache back into server dict for CSV save
-                        favicon_html = f'<img src="{favicon_url}" width="32" height="32">'
+                        s['iconurl'] = favicon_url
+                proto_badge = protocol.upper()
             else:
-                http_link = f"http://{link_host}:{s.get('port')}"
-                https_link = f"https://{link_host}:{s.get('port')}"
-                links_html = (f'{html.escape(s.get("port", ""))} '
-                              f'(<a href="{http_link}" target="_blank">http</a>, '
-                              f'<a href="{https_link}" target="_blank">https</a>)')
-        # Data for each cell, pre-escaped
-        cell_data = {
-            'icon': favicon_html,
-            'status': html.escape(status), 'process': html.escape(s.get('process', '')),
-            'pid': html.escape(s.get('pid', '')), 'arguments': html.escape(s.get('cmdline', '')),
-            'working dir': html.escape(s.get('cwd', '')), 'annotation': html.escape(s.get('annotation', '')),
-            'local ip': html.escape(s.get('ip', '')), 'port / links': links_html
-        }
+                # Unknown protocol — offer both
+                primary_link = f"http://{link_host}:{port}"
+                proto_badge = "HTTP/S"
 
-        html_content += f'<tr class="{row_class}">'
-        for key, _ in columns.items():
-            if key.lower() not in hidden_cols:
-                # Use a title attribute for ellipsis, and render the data
-                title = cell_data[key] if key not in ['port / links', 'icon'] else ''
-                html_content += f'<td class="ellipsis" title="{title}">{cell_data[key]}</td>'
-        html_content += "</tr>"
-        
-    html_content += "</table></body></html>"
-    return html_content
+        # Icon: image if we have one, otherwise a coloured initial
+        if favicon_url:
+            icon_html = f'<img class="app-icon-img" src="{html.escape(favicon_url)}" alt="" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'">'
+            # Fallback initial shown via onerror
+            initial = label[0].upper() if label else '?'
+            icon_html += f'<div class="app-icon-initial" style="display:none">{initial}</div>'
+        else:
+            initial = label[0].upper() if label else '?'
+            icon_html = f'<div class="app-icon-initial">{initial}</div>'
+
+        # Status dot
+        dot_class = "dot-running" if running else "dot-offline"
+        dot_title = "Running" if running else "Not Running"
+
+        # Tooltip detail
+        tooltip = f"Port: {port}"
+        if pid:      tooltip += f" | PID: {pid}"
+        if process:  tooltip += f" | {process}"
+        if cwd and cwd != 'N/A': tooltip += f" | {cwd}"
+        if cmdline and cmdline != 'N/A': tooltip += f" | {cmdline}"
+
+        # Protocol links for unknown-protocol running servers
+        extra_links = ""
+        if running and protocol not in ('http', 'https'):
+            http_l  = f"http://{link_host}:{port}"
+            https_l = f"https://{link_host}:{port}"
+            extra_links = (f'<div class="proto-links">'
+                           f'<a href="{http_l}" target="_blank">http</a>'
+                           f'<a href="{https_l}" target="_blank">https</a>'
+                           f'</div>')
+
+        card_class = "app-card" + ("" if running else " app-card-offline")
+
+        if primary_link and running and protocol in ('http', 'https'):
+            card_inner = (f'<a class="{card_class}" href="{primary_link}" target="_blank" title="{html.escape(tooltip)}">'
+                          f'  <span class="status-dot {dot_class}" title="{dot_title}"></span>'
+                          f'  <div class="app-icon">{icon_html}</div>'
+                          f'  <div class="app-label">{label}</div>'
+                          f'  <div class="app-port">:{port}'
+                          f'    {f"<span class=\'proto-tag\'>{proto_badge}</span>" if proto_badge else ""}'
+                          f'  </div>'
+                          f'</a>')
+        else:
+            card_inner = (f'<div class="{card_class}" title="{html.escape(tooltip)}">'
+                          f'  <span class="status-dot {dot_class}" title="{dot_title}"></span>'
+                          f'  <div class="app-icon">{icon_html}</div>'
+                          f'  <div class="app-label">{label}</div>'
+                          f'  <div class="app-port">:{port}'
+                          f'    {f"<span class=\'proto-tag\'>{proto_badge}</span>" if proto_badge else ""}'
+                          f'  </div>'
+                          f'  {extra_links}'
+                          f'</div>')
+
+        cards_html += card_inner
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>App Launcher</title>
+<style>
+  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
+  body {{
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #0f0f13;
+    color: #e8e8f0;
+    min-height: 100vh;
+    padding: 32px 24px 48px;
+  }}
+
+  header {{
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 32px;
+  }}
+  header h1 {{
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #fff;
+    letter-spacing: .02em;
+  }}
+  header span {{
+    font-size: .8rem;
+    color: #555;
+  }}
+
+  .grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    gap: 18px;
+  }}
+
+  /* ── shared card base ── */
+  .app-card, a.app-card {{
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 20px 10px 16px;
+    border-radius: 18px;
+    background: #1a1a24;
+    border: 1px solid #2a2a38;
+    text-decoration: none;
+    color: inherit;
+    cursor: default;
+    transition: transform .15s, background .15s, box-shadow .15s;
+    user-select: none;
+  }}
+  a.app-card {{
+    cursor: pointer;
+  }}
+  a.app-card:hover {{
+    transform: translateY(-4px) scale(1.03);
+    background: #22223a;
+    box-shadow: 0 8px 32px rgba(0,0,0,.45);
+    border-color: #4a4aff44;
+  }}
+  a.app-card:active {{
+    transform: translateY(-1px) scale(1.01);
+  }}
+
+  .app-card-offline {{
+    opacity: .45;
+    filter: grayscale(.6);
+  }}
+
+  /* ── icon area ── */
+  .app-icon {{
+    width: 64px;
+    height: 64px;
+    border-radius: 14px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #25253a;
+    flex-shrink: 0;
+  }}
+  .app-icon-img {{
+    width: 64px;
+    height: 64px;
+    object-fit: contain;
+    border-radius: 14px;
+  }}
+  .app-icon-initial {{
+    width: 64px;
+    height: 64px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: #fff;
+    background: linear-gradient(135deg, #4a4aff, #9b59b6);
+    flex-shrink: 0;
+  }}
+
+  /* ── labels ── */
+  .app-label {{
+    font-size: .78rem;
+    font-weight: 500;
+    text-align: center;
+    color: #d0d0e8;
+    line-height: 1.3;
+    max-width: 100%;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }}
+  .app-port {{
+    font-size: .7rem;
+    color: #666;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }}
+
+  /* ── proto tag ── */
+  .proto-tag {{
+    font-size: .6rem;
+    font-weight: 700;
+    letter-spacing: .05em;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: #2a2a50;
+    color: #7878ff;
+    text-transform: uppercase;
+  }}
+
+  /* ── proto links (no-protocol cards) ── */
+  .proto-links {{
+    display: flex;
+    gap: 6px;
+    margin-top: 2px;
+  }}
+  .proto-links a {{
+    font-size: .65rem;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 5px;
+    background: #1e1e38;
+    border: 1px solid #3a3a5a;
+    color: #7878ff;
+    text-decoration: none;
+    cursor: pointer;
+  }}
+  .proto-links a:hover {{ background: #2a2a50; }}
+
+  /* ── status dot ── */
+  .status-dot {{
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }}
+  .dot-running  {{ background: #22c55e; box-shadow: 0 0 6px #22c55e88; }}
+  .dot-offline  {{ background: #444; }}
+
+  /* ── hint ── */
+  .hint {{
+    margin-top: 40px;
+    font-size: .72rem;
+    color: #333;
+    text-align: center;
+  }}
+  .hint code {{ color: #555; }}
+</style>
+</head>
+<body>
+<header>
+  <h1>App Launcher</h1>
+  <span>edit <code>{ANNOTATIONS_FILE}</code> to annotate &amp; hide entries</span>
+</header>
+<div class="grid">
+{cards_html}
+</div>
+<p class="hint">Tip: set <code>annotation</code> for a friendly name · set <code>protocol</code> to http or https to make a card clickable · set <code>hidden</code> to true to suppress an entry</p>
+</body>
+</html>"""
 
 class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
