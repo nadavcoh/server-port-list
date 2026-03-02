@@ -4,6 +4,7 @@ import psutil
 import html
 import csv
 import os
+import requests
 
 PORT = 80
 ANNOTATIONS_FILE = 'annotations.csv'
@@ -75,6 +76,25 @@ def get_running_servers():
                 servers.append({'ip': conn.laddr.ip, 'port': str(conn.laddr.port), 'pid': str(conn.pid), 'process': process_name, 'cmdline': cmdline, 'cwd': cwd})
     return servers
 
+def get_favicon_url(link):
+    """Attempts to find a favicon URL for a given server link."""
+    try:
+        # First, try the default favicon location
+        favicon_url = f"{link}/favicon.ico"
+        response = requests.get(favicon_url, timeout=0.5)
+        if response.status_code == 200:
+            return favicon_url
+    except requests.RequestException:
+        # If the direct request fails, try Google's favicon service
+        try:
+            google_favicon_url = f"https://www.google.com/s2/favicons?domain={link.split('//')[1].split(':')[0]}"
+            response = requests.get(google_favicon_url, timeout=1)
+            if response.status_code == 200 and response.content:
+                return google_favicon_url
+        except requests.RequestException:
+            pass  # Can't fetch from Google either
+    return None
+
 def generate_html(config, servers, request_host):
     """Compiles the gathered data into an HTML page, respecting display settings."""
     base_host = request_host.split(':')[0] if request_host else "localhost"
@@ -82,7 +102,7 @@ def generate_html(config, servers, request_host):
 
     # Define all possible columns
     columns = {
-        'status': ('Status', '10%'), 'process': ('Process Name', '12%'), 'pid': ('PID', '5%'),
+        'icon': ('Icon', '5%'), 'status': ('Status', '10%'), 'process': ('Process Name', '12%'), 'pid': ('PID', '5%'),
         'arguments': ('Arguments', '20%'), 'working dir': ('Working Dir', '15%'),
         'annotation': ('Annotation', '15%'), 'local ip': ('Local IP', '8%'),
         'port / links': ('Port / Links', '15%')
@@ -121,6 +141,7 @@ def generate_html(config, servers, request_host):
         row_class = 'not-running' if status == 'Not Running' else ''
         
         links_html = html.escape(s.get('port', ''))
+        favicon_html = ""
         if status == 'Running':
             link_host = "localhost" if s.get('ip') in ["127.0.0.1", "::1"] else base_host
             protocol = s.get('protocol', '').lower()
@@ -128,15 +149,18 @@ def generate_html(config, servers, request_host):
             if protocol in ['http', 'https']:
                 link = f"{protocol}://{link_host}:{s.get('port')}"
                 links_html = f'<a href="{link}" target="_blank">{s.get("port")}</a> ({protocol})'
+                favicon_url = get_favicon_url(link)
+                if favicon_url:
+                    favicon_html = f'<img src="{favicon_url}" width="16" height="16">'
             else:
                 http_link = f"http://{link_host}:{s.get('port')}"
                 https_link = f"https://{link_host}:{s.get('port')}"
                 links_html = (f'{html.escape(s.get("port", ""))} '
                               f'(<a href="{http_link}" target="_blank">http</a>, '
                               f'<a href="{https_link}" target="_blank">https</a>)')
-            
         # Data for each cell, pre-escaped
         cell_data = {
+            'icon': favicon_html,
             'status': html.escape(status), 'process': html.escape(s.get('process', '')),
             'pid': html.escape(s.get('pid', '')), 'arguments': html.escape(s.get('cmdline', '')),
             'working dir': html.escape(s.get('cwd', '')), 'annotation': html.escape(s.get('annotation', '')),
