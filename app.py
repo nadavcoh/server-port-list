@@ -6,7 +6,6 @@ PORT = 80
 
 def get_listening_ports():
     """Queries Windows for listening ports and their associated process names."""
-    # 1. Get process IDs and names using tasklist
     try:
         task_output = subprocess.check_output(['tasklist', '/fo', 'csv', '/nh']).decode('utf-8', errors='ignore')
     except subprocess.CalledProcessError:
@@ -20,7 +19,6 @@ def get_listening_ports():
         if len(parts) >= 2:
             pid_to_name[parts[1]] = parts[0]
 
-    # 2. Get active listening ports using netstat
     try:
         netstat_output = subprocess.check_output(['netstat', '-ano']).decode('utf-8', errors='ignore')
     except subprocess.CalledProcessError:
@@ -32,7 +30,6 @@ def get_listening_ports():
     for line in netstat_output.splitlines():
         if 'LISTENING' in line and 'TCP' in line:
             parts = line.split()
-            # netstat format: Protocol, Local Address, Foreign Address, State, PID
             if len(parts) >= 5:
                 local_addr = parts[1]
                 pid = parts[4]
@@ -40,7 +37,6 @@ def get_listening_ports():
                 if ':' in local_addr:
                     ip, port = local_addr.rsplit(':', 1)
                     
-                    # Avoid duplicates (e.g., listening on both IPv4 and IPv6)
                     identifier = (port, pid)
                     if identifier not in seen:
                         seen.add(identifier)
@@ -52,11 +48,14 @@ def get_listening_ports():
                             'process': process_name
                         })
             
-    # Sort by port number for better readability
     return sorted(servers, key=lambda x: int(x['port']))
 
-def generate_html(servers):
+def generate_html(servers, request_host):
     """Compiles the gathered data into an HTML page with links."""
+    
+    # Strip the port from the Host header if it exists (e.g., '192.168.1.5:80' -> '192.168.1.5')
+    base_host = request_host.split(':')[0] if request_host else "localhost"
+
     html = """
     <!DOCTYPE html>
     <html>
@@ -90,12 +89,15 @@ def generate_html(servers):
         ip = s['ip']
         port = s['port']
         
-        # If bound to 0.0.0.0 or [::], format the link to use localhost so it resolves in the browser
-        link_ip = "localhost" if ip in ["0.0.0.0", "[::]", "127.0.0.1", "::1"] else ip
-        
-        # Guess protocol (basic assumption for links)
+        # If the service is explicitly bound ONLY to the local loopback, force the link to localhost 
+        # because it won't be accessible remotely anyway. Otherwise, use the request's hostname/IP.
+        if ip in ["127.0.0.1", "::1"]:
+            link_host = "localhost"
+        else:
+            link_host = base_host
+            
         protocol = "https" if port == "443" else "http"
-        link = f"{protocol}://{link_ip}:{port}"
+        link = f"{protocol}://{link_host}:{port}"
         
         html += f"""
             <tr>
@@ -114,34 +116,32 @@ def generate_html(servers):
     return html
 
 class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
-    """Custom request handler that generates the HTML on every GET request."""
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
         
-        # Dynamically fetch ports and generate HTML on every page load
+        # Capture the 'Host' header sent by the client's browser
+        host_header = self.headers.get('Host', 'localhost')
+        
         servers = get_listening_ports()
-        html_content = generate_html(servers)
+        html_content = generate_html(servers, host_header)
         
         self.wfile.write(html_content.encode('utf-8'))
 
-    # Suppress default logging to keep the console clean (optional)
     def log_message(self, format, *args):
         print(f"[{self.log_date_time_string()}] Served dynamic list to {self.client_address[0]}")
 
 if __name__ == "__main__":
     try:
-        # Create the server
         with socketserver.TCPServer(("", PORT), DynamicServerHandler) as httpd:
             print(f"Starting server... Listening on port {PORT}.")
-            print(f"Open http://localhost/ in your web browser.")
             print("Press Ctrl+C to stop the server.")
             httpd.serve_forever()
     except PermissionError:
         print(f"ERROR: Permission denied. You must run this script as an Administrator to bind to port {PORT}.")
     except OSError as e:
         if e.errno == 10048:
-            print(f"ERROR: Port {PORT} is already in use. If IIS, Apache, or another service is running on port 80, you will need to stop it or change the PORT variable in this script.")
+            print(f"ERROR: Port {PORT} is already in use. Stop the conflicting service or change the PORT variable.")
         else:
             print(f"OS Error: {e}")
