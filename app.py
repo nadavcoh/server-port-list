@@ -55,8 +55,12 @@ def get_listening_ports():
     # Sort by port number for better readability
     return sorted(servers, key=lambda x: int(x['port']))
 
-def generate_html(servers):
+def generate_html(servers, request_host):
     """Compiles the gathered data into an HTML page with links."""
+    
+    # Strip the port from the Host header if it exists (e.g., '192.168.1.5:80' -> '192.168.1.5')
+    base_host = request_host.split(':')[0] if request_host else "localhost"
+
     html = """
     <!DOCTYPE html>
     <html>
@@ -90,12 +94,15 @@ def generate_html(servers):
         ip = s['ip']
         port = s['port']
         
-        # If bound to 0.0.0.0 or [::], format the link to use localhost so it resolves in the browser
-        link_ip = "localhost" if ip in ["0.0.0.0", "[::]", "127.0.0.1", "::1"] else ip
-        
-        # Guess protocol (basic assumption for links)
+        # If the service is explicitly bound ONLY to the local loopback, force the link to localhost 
+        # because it won't be accessible remotely anyway. Otherwise, use the request's hostname/IP.
+        if ip in ["127.0.0.1", "::1"]:
+            link_host = "localhost"
+        else:
+            link_host = base_host
+            
         protocol = "https" if port == "443" else "http"
-        link = f"{protocol}://{link_ip}:{port}"
+        link = f"{protocol}://{link_host}:{port}"
         
         html += f"""
             <tr>
@@ -120,9 +127,11 @@ class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
         
-        # Dynamically fetch ports and generate HTML on every page load
+        # Capture the 'Host' header sent by the client's browser
+        host_header = self.headers.get('Host', 'localhost')
+        
         servers = get_listening_ports()
-        html_content = generate_html(servers)
+        html_content = generate_html(servers, host_header)
         
         self.wfile.write(html_content.encode('utf-8'))
 
@@ -142,6 +151,6 @@ if __name__ == "__main__":
         print(f"ERROR: Permission denied. You must run this script as an Administrator to bind to port {PORT}.")
     except OSError as e:
         if e.errno == 10048:
-            print(f"ERROR: Port {PORT} is already in use. If IIS, Apache, or another service is running on port 80, you will need to stop it or change the PORT variable in this script.")
+            print(f"ERROR: Port {PORT} is already in use. Stop the conflicting service or change the PORT variable.")
         else:
             print(f"OS Error: {e}")
