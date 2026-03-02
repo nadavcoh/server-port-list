@@ -6,6 +6,8 @@ import csv
 import os
 import re
 import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 PORT = 80
 ANNOTATIONS_FILE = 'annotations.csv'
@@ -111,7 +113,7 @@ def get_favicon_url(link):
         return f"{base.rstrip('/')}/{href}"
 
     try:
-        response = requests.get(link, timeout=2, allow_redirects=True)
+        response = requests.get(link, timeout=2, allow_redirects=True, verify=False)
         if response.status_code == 200:
             page_html = response.text
 
@@ -168,7 +170,7 @@ def get_favicon_url(link):
     # Fallback 1: /favicon.ico
     try:
         favicon_url = f"{link}/favicon.ico"
-        response = requests.get(favicon_url, timeout=1)
+        response = requests.get(favicon_url, timeout=1, verify=False)
         if response.status_code == 200 and response.content:
             return favicon_url
     except requests.RequestException:
@@ -178,7 +180,7 @@ def get_favicon_url(link):
     try:
         domain = link.split('//')[1].split(':')[0].split('/')[0]
         google_favicon_url = f"https://www.google.com/s2/favicons?sz=64&domain={domain}"
-        response = requests.get(google_favicon_url, timeout=1)
+        response = requests.get(google_favicon_url, timeout=1, verify=False)
         if response.status_code == 200 and response.content:
             return google_favicon_url
     except requests.RequestException:
@@ -244,7 +246,7 @@ def generate_html(config, servers, request_host):
                 favicon_url = s.get('iconurl') or get_favicon_url(link)
                 if favicon_url:
                     s['iconurl'] = favicon_url  # cache back into server dict for CSV save
-                    favicon_html = f'<img src="{favicon_url}" width="16" height="16">'
+                    favicon_html = f'<img src="{favicon_url}" width="32" height="32">'
             else:
                 http_link = f"http://{link_host}:{s.get('port')}"
                 https_link = f"https://{link_host}:{s.get('port')}"
@@ -264,7 +266,7 @@ def generate_html(config, servers, request_host):
         for key, _ in columns.items():
             if key.lower() not in hidden_cols:
                 # Use a title attribute for ellipsis, and render the data
-                title = cell_data[key] if key not in ['port / links'] else ''
+                title = cell_data[key] if key not in ['port / links', 'icon'] else ''
                 html_content += f'<td class="ellipsis" title="{title}">{cell_data[key]}</td>'
         html_content += "</tr>"
         
