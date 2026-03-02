@@ -49,7 +49,7 @@ def save_servers_to_csv(config, servers):
             })
 
             # Filter out transient entries and write server rows
-            servers_to_save = [s for s in servers if s.get('status') == 'Running' or s.get('annotation')]
+            servers_to_save = [s for s in servers if s.get('status') == 'Running' or s.get('annotation') or s.get('hidden', '').lower() == 'true']
             writer.writerows(servers_to_save)
     except (IOError, csv.Error) as e:
         print(f"Error saving CSV data: {e}")
