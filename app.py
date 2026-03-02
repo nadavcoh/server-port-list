@@ -290,7 +290,10 @@ class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
         save_servers_to_csv(config, all_known_servers.values())
         
         html_content = generate_html(config, final_server_list, host_header)
-        self.wfile.write(html_content.encode('utf-8'))
+        try:
+            self.wfile.write(html_content.encode('utf-8'))
+        except (ConnectionAbortedError, BrokenPipeError) as e:
+            print(f"[{self.log_date_time_string()}] Connection dropped by {self.client_address[0]}: {e}")
 
     def log_message(self, format, *args):
         print(f"[{self.log_date_time_string()}] Served dynamic list to {self.client_address[0]}")
