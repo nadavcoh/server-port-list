@@ -4,6 +4,7 @@ import psutil
 import html
 import csv
 import os
+import re
 import requests
 
 PORT = 80
@@ -39,7 +40,7 @@ def save_servers_to_csv(config, servers):
     try:
         with open(ANNOTATIONS_FILE, mode='w', newline='', encoding='utf-8') as csvfile:
             # Add new control fields to the header
-            fieldnames = ['process', 'pid', 'cmdline', 'cwd', 'ip', 'port', 'annotation', 'hidden', 'protocol']
+            fieldnames = ['process', 'pid', 'cmdline', 'cwd', 'ip', 'port', 'annotation', 'hidden', 'protocol', 'iconurl']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
             
@@ -77,22 +78,112 @@ def get_running_servers():
     return servers
 
 def get_favicon_url(link):
-    """Attempts to find a favicon URL for a given server link."""
+    """
+    Attempts to find the largest icon URL for a given server link.
+    Strategy:
+      1. Fetch the page HTML and parse all <link rel="icon|apple-touch-icon|..."> tags.
+         Pick the one with the largest declared size (e.g. sizes="192x192").
+      2. Fall back to /favicon.ico if no <link> icons found.
+      3. Fall back to Google's favicon service as a last resort.
+    """
+    def _parse_size(sizes_attr):
+        """Return the largest dimension integer from a sizes attribute like '32x32 64x64'."""
+        best = 0
+        for token in sizes_attr.lower().split():
+            if 'x' in token:
+                try:
+                    w, h = token.split('x', 1)
+                    best = max(best, int(w), int(h))
+                except ValueError:
+                    pass
+        return best
+
+    def _make_absolute(href, base):
+        if href.startswith('http://') or href.startswith('https://'):
+            return href
+        if href.startswith('//'):
+            scheme = base.split('://')[0]
+            return f"{scheme}:{href}"
+        if href.startswith('/'):
+            parts = base.split('://', 1)
+            host_part = parts[1].split('/')[0] if len(parts) > 1 else ''
+            return f"{parts[0]}://{host_part}{href}"
+        return f"{base.rstrip('/')}/{href}"
+
     try:
-        # First, try the default favicon location
-        favicon_url = f"{link}/favicon.ico"
-        response = requests.get(favicon_url, timeout=0.5)
+        response = requests.get(link, timeout=2, allow_redirects=True)
         if response.status_code == 200:
+            page_html = response.text
+
+            # Find all <link> tags that look like icons
+            link_tags = re.findall(
+                r'<link\s[^>]*rel=["\']([^"\']*)["\'][^>]*>',
+                page_html, re.IGNORECASE
+            )
+            # Rebuild by finding the full tag for each icon-like rel
+            icon_tags = re.findall(
+                r'<link\s(?:[^>]*?\s)?rel=["\']([^"\']*(?:icon|shortcut)[^"\']*)["\'][^>]*>',
+                page_html, re.IGNORECASE
+            )
+
+            # Also capture tags where rel comes after href
+            all_icon_tags = re.findall(
+                r'<link\b[^>]*\brel=["\']([^"\']*(?:icon|shortcut|apple-touch)[^"\']*)["\'][^>]*>',
+                page_html, re.IGNORECASE
+            )
+            # Get full tag text for those rel values we care about
+            full_link_tags = re.findall(
+                r'<link\b[^>]*>',
+                page_html, re.IGNORECASE
+            )
+
+            best_url = None
+            best_size = -1
+
+            for tag in full_link_tags:
+                rel_match = re.search(r'\brel=["\']([^"\']*)["\']', tag, re.IGNORECASE)
+                if not rel_match:
+                    continue
+                rel = rel_match.group(1).lower()
+                if not any(k in rel for k in ('icon', 'shortcut', 'apple-touch')):
+                    continue
+
+                href_match = re.search(r'\bhref=["\']([^"\']+)["\']', tag, re.IGNORECASE)
+                if not href_match:
+                    continue
+                href = href_match.group(1)
+
+                sizes_match = re.search(r'\bsizes=["\']([^"\']+)["\']', tag, re.IGNORECASE)
+                size = _parse_size(sizes_match.group(1)) if sizes_match else 0
+
+                if size > best_size:
+                    best_size = size
+                    best_url = _make_absolute(href, link)
+
+            if best_url:
+                return best_url
+    except requests.RequestException:
+        pass
+
+    # Fallback 1: /favicon.ico
+    try:
+        favicon_url = f"{link}/favicon.ico"
+        response = requests.get(favicon_url, timeout=1)
+        if response.status_code == 200 and response.content:
             return favicon_url
     except requests.RequestException:
-        # If the direct request fails, try Google's favicon service
-        try:
-            google_favicon_url = f"https://www.google.com/s2/favicons?domain={link.split('//')[1].split(':')[0]}"
-            response = requests.get(google_favicon_url, timeout=1)
-            if response.status_code == 200 and response.content:
-                return google_favicon_url
-        except requests.RequestException:
-            pass  # Can't fetch from Google either
+        pass
+
+    # Fallback 2: Google favicon service
+    try:
+        domain = link.split('//')[1].split(':')[0].split('/')[0]
+        google_favicon_url = f"https://www.google.com/s2/favicons?sz=64&domain={domain}"
+        response = requests.get(google_favicon_url, timeout=1)
+        if response.status_code == 200 and response.content:
+            return google_favicon_url
+    except requests.RequestException:
+        pass
+
     return None
 
 def generate_html(config, servers, request_host):
@@ -149,8 +240,10 @@ def generate_html(config, servers, request_host):
             if protocol in ['http', 'https']:
                 link = f"{protocol}://{link_host}:{s.get('port')}"
                 links_html = f'<a href="{link}" target="_blank">{s.get("port")}</a> ({protocol})'
-                favicon_url = get_favicon_url(link)
+                # Use cached iconurl from CSV if available, otherwise fetch and cache it
+                favicon_url = s.get('iconurl') or get_favicon_url(link)
                 if favicon_url:
+                    s['iconurl'] = favicon_url  # cache back into server dict for CSV save
                     favicon_html = f'<img src="{favicon_url}" width="16" height="16">'
             else:
                 http_link = f"http://{link_host}:{s.get('port')}"
