@@ -120,16 +120,20 @@ def generate_html(config, servers, request_host):
         status = s.get('status', 'N/A')
         row_class = 'not-running' if status == 'Not Running' else ''
         
-        # Determine the link protocol
-        preferred_protocol = s.get('protocol')
-        if not preferred_protocol or preferred_protocol.lower() not in ['http', 'https']:
-            preferred_protocol = "https" if s.get('port') == "443" else "http"
-        
         links_html = html.escape(s.get('port', ''))
         if status == 'Running':
             link_host = "localhost" if s.get('ip') in ["127.0.0.1", "::1"] else base_host
-            link = f"{preferred_protocol}://{link_host}:{s.get('port')}"
-            links_html = f'<a href="{link}" target="_blank">{s.get("port")}</a> ({preferred_protocol})'
+            protocol = s.get('protocol', '').lower()
+
+            if protocol in ['http', 'https']:
+                link = f"{protocol}://{link_host}:{s.get('port')}"
+                links_html = f'<a href="{link}" target="_blank">{s.get("port")}</a> ({protocol})'
+            else:
+                http_link = f"http://{link_host}:{s.get('port')}"
+                https_link = f"https://{link_host}:{s.get('port')}"
+                links_html = (f'{html.escape(s.get("port", ""))} '
+                              f'(<a href="{http_link}" target="_blank">http</a>, '
+                              f'<a href="{https_link}" target="_blank">https</a>)')
             
         # Data for each cell, pre-escaped
         cell_data = {
