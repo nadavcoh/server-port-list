@@ -1,57 +1,39 @@
-import subprocess
 import http.server
 import socketserver
+import psutil
+import html
 
 PORT = 80
 
 def get_listening_ports():
-    """Queries Windows for listening ports and their associated process names."""
-    # 1. Get process IDs and names using tasklist
-    try:
-        task_output = subprocess.check_output(['tasklist', '/fo', 'csv', '/nh']).decode('utf-8', errors='ignore')
-    except subprocess.CalledProcessError:
-        task_output = ""
-
-    pid_to_name = {}
-    for line in task_output.splitlines():
-        if not line.strip():
-            continue
-        parts = line.replace('"', '').split(',')
-        if len(parts) >= 2:
-            pid_to_name[parts[1]] = parts[0]
-
-    # 2. Get active listening ports using netstat
-    try:
-        netstat_output = subprocess.check_output(['netstat', '-ano']).decode('utf-8', errors='ignore')
-    except subprocess.CalledProcessError:
-        netstat_output = ""
-    
+    """Queries the system for listening ports and their associated process details."""
     servers = []
     seen = set()
 
-    for line in netstat_output.splitlines():
-        if 'LISTENING' in line and 'TCP' in line:
-            parts = line.split()
-            # netstat format: Protocol, Local Address, Foreign Address, State, PID
-            if len(parts) >= 5:
-                local_addr = parts[1]
-                pid = parts[4]
+    for conn in psutil.net_connections(kind='inet'):
+        if conn.status == psutil.CONN_LISTEN and conn.laddr.port and conn.pid:
+            # Avoid duplicates (e.g., listening on both IPv4 and IPv6)
+            identifier = (conn.laddr.port, conn.pid)
+            if identifier not in seen:
+                seen.add(identifier)
                 
-                if ':' in local_addr:
-                    ip, port = local_addr.rsplit(':', 1)
-                    
-                    # Avoid duplicates (e.g., listening on both IPv4 and IPv6)
-                    identifier = (port, pid)
-                    if identifier not in seen:
-                        seen.add(identifier)
-                        process_name = pid_to_name.get(pid, "System/Unknown")
-                        servers.append({
-                            'ip': ip, 
-                            'port': port, 
-                            'pid': pid, 
-                            'process': process_name
-                        })
-            
+                try:
+                    p = psutil.Process(conn.pid)
+                    process_name = p.name()
+                    # Join command-line arguments into a string, escaping for HTML
+                    cmdline = ' '.join(map(html.escape, p.cmdline()))
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    process_name = "System/Unknown"
+                    cmdline = "N/A"
+
+                servers.append({
+                    'ip': conn.laddr.ip,
+                    'port': str(conn.laddr.port),
+                    'pid': str(conn.pid),
+                    'process': process_name,
+                    'cmdline': cmdline
+                })
+
     # Sort by port number for better readability
     return sorted(servers, key=lambda x: int(x['port']))
 
@@ -61,7 +43,7 @@ def generate_html(servers, request_host):
     # Strip the port from the Host header if it exists (e.g., '192.168.1.5:80' -> '192.168.1.5')
     base_host = request_host.split(':')[0] if request_host else "localhost"
 
-    html = """
+    html_content = """
     <!DOCTYPE html>
     <html>
     <head>
@@ -76,6 +58,7 @@ def generate_html(servers, request_host):
             tr:hover { background-color: #e1f0fa; }
             a { color: #0078d7; text-decoration: none; font-weight: bold; }
             a:hover { text-decoration: underline; }
+            .cmdline { max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'Courier New', monospace; font-size: 0.9em; color: #555; }
         </style>
     </head>
     <body>
@@ -85,6 +68,7 @@ def generate_html(servers, request_host):
             <tr>
                 <th>Process Name</th>
                 <th>PID</th>
+                <th>Arguments</th>
                 <th>Local IP Bind</th>
                 <th>Port / Link</th>
             </tr>
@@ -104,21 +88,22 @@ def generate_html(servers, request_host):
         protocol = "https" if port == "443" else "http"
         link = f"{protocol}://{link_host}:{port}"
         
-        html += f"""
+        html_content += f"""
             <tr>
                 <td>{s['process']}</td>
                 <td>{s['pid']}</td>
+                <td class="cmdline" title="{s['cmdline']}">{s['cmdline']}</td>
                 <td>{ip}</td>
                 <td><a href="{link}" target="_blank">Port {port}</a></td>
             </tr>
         """
         
-    html += """
+    html_content += """
         </table>
     </body>
     </html>
     """
-    return html
+    return html_content
 
 class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
     """Custom request handler that generates the HTML on every GET request."""
@@ -140,6 +125,14 @@ class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
         print(f"[{self.log_date_time_string()}] Served dynamic list to {self.client_address[0]}")
 
 if __name__ == "__main__":
+    try:
+        # Check for psutil and provide a helpful message if it's missing
+        import psutil
+    except ImportError:
+        print("ERROR: The 'psutil' library is not installed.")
+        print("Please install it by running: pip install -r requirements.txt")
+        exit(1)
+
     try:
         # Create the server
         with socketserver.TCPServer(("", PORT), DynamicServerHandler) as httpd:
