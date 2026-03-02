@@ -94,7 +94,7 @@ def generate_html(servers, request_host):
             tr:nth-child(even) { background-color: #f2f2f2; }
             tr:hover { background-color: #e1f0fa; }
             .not-running { color: #888; background-color: #fafafa; }
-            .not-running a { color: #888; pointer-events: none; }
+            .not-running a { color: #aaa; pointer-events: none; text-decoration: line-through; }
             a { color: #0078d7; text-decoration: none; font-weight: bold; }
             a:hover { text-decoration: underline; }
             .ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -112,7 +112,7 @@ def generate_html(servers, request_host):
                 <th style="width: 15%;">Working Dir</th>
                 <th style="width: 15%;">Annotation</th>
                 <th style="width: 8%;">Local IP</th>
-                <th style="width: 8%;">Port</th>
+                <th style="width: 15%;">Port / Links</th>
             </tr>
     """
     
@@ -129,12 +129,13 @@ def generate_html(servers, request_host):
         ip = html.escape(s.get('ip', ''))
         port = html.escape(s.get('port', ''))
 
-        link = "#"
+        links_html = port
         if status == 'Running':
             link_host = "localhost" if ip in ["127.0.0.1", "::1"] else base_host
-            protocol = "https" if port == "443" else "http"
-            link = f"{protocol}://{link_host}:{port}"
-
+            http_link = f"http://{link_host}:{port}"
+            https_link = f"https://{link_host}:{port}"
+            links_html = f"""{port} (<a href="{http_link}" target="_blank">http</a> | <a href="{https_link}" target="_blank">https</a>)"""
+        
         html_content += f"""
             <tr class="{row_class}">
                 <td>{status}</td>
@@ -144,7 +145,7 @@ def generate_html(servers, request_host):
                 <td class="ellipsis" title="{cwd}">{cwd}</td>
                 <td>{annotation}</td>
                 <td>{ip}</td>
-                <td><a href="{link}" target="_blank">{port}</a></td>
+                <td>{links_html}</td>
             </tr>
         """
         
