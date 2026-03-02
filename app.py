@@ -6,6 +6,7 @@ PORT = 80
 
 def get_listening_ports():
     """Queries Windows for listening ports and their associated process names."""
+    # 1. Get process IDs and names using tasklist
     try:
         task_output = subprocess.check_output(['tasklist', '/fo', 'csv', '/nh']).decode('utf-8', errors='ignore')
     except subprocess.CalledProcessError:
@@ -19,6 +20,7 @@ def get_listening_ports():
         if len(parts) >= 2:
             pid_to_name[parts[1]] = parts[0]
 
+    # 2. Get active listening ports using netstat
     try:
         netstat_output = subprocess.check_output(['netstat', '-ano']).decode('utf-8', errors='ignore')
     except subprocess.CalledProcessError:
@@ -30,6 +32,7 @@ def get_listening_ports():
     for line in netstat_output.splitlines():
         if 'LISTENING' in line and 'TCP' in line:
             parts = line.split()
+            # netstat format: Protocol, Local Address, Foreign Address, State, PID
             if len(parts) >= 5:
                 local_addr = parts[1]
                 pid = parts[4]
@@ -37,6 +40,7 @@ def get_listening_ports():
                 if ':' in local_addr:
                     ip, port = local_addr.rsplit(':', 1)
                     
+                    # Avoid duplicates (e.g., listening on both IPv4 and IPv6)
                     identifier = (port, pid)
                     if identifier not in seen:
                         seen.add(identifier)
@@ -48,6 +52,7 @@ def get_listening_ports():
                             'process': process_name
                         })
             
+    # Sort by port number for better readability
     return sorted(servers, key=lambda x: int(x['port']))
 
 def generate_html(servers, request_host):
@@ -116,6 +121,7 @@ def generate_html(servers, request_host):
     return html
 
 class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
+    """Custom request handler that generates the HTML on every GET request."""
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
@@ -129,13 +135,16 @@ class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
         
         self.wfile.write(html_content.encode('utf-8'))
 
+    # Suppress default logging to keep the console clean (optional)
     def log_message(self, format, *args):
         print(f"[{self.log_date_time_string()}] Served dynamic list to {self.client_address[0]}")
 
 if __name__ == "__main__":
     try:
+        # Create the server
         with socketserver.TCPServer(("", PORT), DynamicServerHandler) as httpd:
             print(f"Starting server... Listening on port {PORT}.")
+            print(f"Open http://localhost/ in your web browser.")
             print("Press Ctrl+C to stop the server.")
             httpd.serve_forever()
     except PermissionError:
