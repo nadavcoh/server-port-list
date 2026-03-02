@@ -116,28 +116,10 @@ def get_favicon_url(link):
         response = requests.get(link, timeout=2, allow_redirects=True, verify=False)
         if response.status_code == 200:
             page_html = response.text
+            # Use the final URL after any redirects as the base for resolving relative hrefs
+            final_base = response.url
 
-            # Find all <link> tags that look like icons
-            link_tags = re.findall(
-                r'<link\s[^>]*rel=["\']([^"\']*)["\'][^>]*>',
-                page_html, re.IGNORECASE
-            )
-            # Rebuild by finding the full tag for each icon-like rel
-            icon_tags = re.findall(
-                r'<link\s(?:[^>]*?\s)?rel=["\']([^"\']*(?:icon|shortcut)[^"\']*)["\'][^>]*>',
-                page_html, re.IGNORECASE
-            )
-
-            # Also capture tags where rel comes after href
-            all_icon_tags = re.findall(
-                r'<link\b[^>]*\brel=["\']([^"\']*(?:icon|shortcut|apple-touch)[^"\']*)["\'][^>]*>',
-                page_html, re.IGNORECASE
-            )
-            # Get full tag text for those rel values we care about
-            full_link_tags = re.findall(
-                r'<link\b[^>]*>',
-                page_html, re.IGNORECASE
-            )
+            full_link_tags = re.findall(r'<link\b[^>]*>', page_html, re.IGNORECASE)
 
             best_url = None
             best_size = -1
@@ -160,7 +142,7 @@ def get_favicon_url(link):
 
                 if size > best_size:
                     best_size = size
-                    best_url = _make_absolute(href, link)
+                    best_url = _make_absolute(href, final_base)
 
             if best_url:
                 return best_url
@@ -242,11 +224,13 @@ def generate_html(config, servers, request_host):
             if protocol in ['http', 'https']:
                 link = f"{protocol}://{link_host}:{s.get('port')}"
                 links_html = f'<a href="{link}" target="_blank">{s.get("port")}</a> ({protocol})'
-                # Use cached iconurl from CSV if available, otherwise fetch and cache it
-                favicon_url = s.get('iconurl') or get_favicon_url(link)
-                if favicon_url:
-                    s['iconurl'] = favicon_url  # cache back into server dict for CSV save
-                    favicon_html = f'<img src="{favicon_url}" width="32" height="32">'
+                # Skip icon lookup for hidden rows
+                if s.get('hidden', '').lower() != 'true':
+                    # Use cached iconurl from CSV if available, otherwise fetch and cache it
+                    favicon_url = s.get('iconurl') or get_favicon_url(link)
+                    if favicon_url:
+                        s['iconurl'] = favicon_url  # cache back into server dict for CSV save
+                        favicon_html = f'<img src="{favicon_url}" width="32" height="32">'
             else:
                 http_link = f"http://{link_host}:{s.get('port')}"
                 https_link = f"https://{link_host}:{s.get('port')}"
