@@ -187,6 +187,8 @@ def fetch_icons_for_servers(servers):
         favicon_url = get_favicon_url(fetch_link)
         if favicon_url:
             s['iconurl'] = favicon_url
+
+def generate_html(config, servers, request_host):
     """Renders servers as a visual app-picker / home-screen grid."""
     base_host = request_host.split(':')[0] if request_host else "localhost"
 
