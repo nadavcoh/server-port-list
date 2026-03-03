@@ -170,7 +170,23 @@ def get_favicon_url(link):
 
     return None
 
-def generate_html(config, servers, request_host):
+def fetch_icons_for_servers(servers):
+    """Fetches and caches iconurl for any running server that doesn't have one yet."""
+    for s in servers:
+        if s.get('hidden', '').lower() == 'true':
+            continue
+        if s.get('iconurl'):
+            continue
+        if s.get('status') != 'Running':
+            continue
+        protocol = s.get('protocol', '').lower()
+        if protocol not in ('http', 'https'):
+            continue
+        port = s.get('port', '')
+        fetch_link = f"{protocol}://localhost:{port}"
+        favicon_url = get_favicon_url(fetch_link)
+        if favicon_url:
+            s['iconurl'] = favicon_url
     """Renders servers as a visual app-picker / home-screen grid."""
     base_host = request_host.split(':')[0] if request_host else "localhost"
 
@@ -195,19 +211,15 @@ def generate_html(config, servers, request_host):
         if running:
             if protocol in ('http', 'https'):
                 primary_link = f"{protocol}://{link_host}:{port}"
-                # Icon fetch always uses localhost — the fetch runs on the server itself.
-                # base_host (the request hostname) may not resolve locally.
-                fetch_link = f"{protocol}://localhost:{port}"
-                if s.get('hidden', '').lower() != 'true':
-                    favicon_url = s.get('iconurl') or get_favicon_url(fetch_link)
-                    if favicon_url:
-                        s['iconurl'] = favicon_url  # stored with localhost, rewritten at render time
-                        # Rewrite local/private hosts to base_host so any client on the network can reach the icon.
-                        _LOCAL = re.compile(r'^(localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)$')
-                        def _rewrite_host(m):
-                            host = m.group(2)
-                            return m.group(1) + (base_host if _LOCAL.match(host) else host)
-                        favicon_url = re.sub(r'(https?://)([^/:]+)', _rewrite_host, favicon_url, count=1)
+                # iconurl was already fetched and cached before this function was called
+                raw_favicon = s.get('iconurl')
+                if raw_favicon:
+                    # Rewrite local/private hosts to base_host so any client can load the icon
+                    _LOCAL = re.compile(r'^(localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)$')
+                    def _rewrite_host(m):
+                        host = m.group(2)
+                        return m.group(1) + (base_host if _LOCAL.match(host) else host)
+                    favicon_url = re.sub(r'(https?://)([^/:]+)', _rewrite_host, raw_favicon, count=1)
                 proto_badge = protocol.upper()
             else:
                 # Unknown protocol — offer both
@@ -465,7 +477,9 @@ def generate_html(config, servers, request_host):
 </body>
 </html>"""
 
-class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
+class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
@@ -495,6 +509,9 @@ class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
         
         final_server_list.sort(key=lambda s: (not s.get('annotation'), int(s.get('port', 0))))
 
+        # Fetch missing icons BEFORE saving so iconurl gets persisted to CSV
+        fetch_icons_for_servers(final_server_list)
+
         save_servers_to_csv(config, all_known_servers.values())
         
         html_content = generate_html(config, final_server_list, host_header)
@@ -512,7 +529,7 @@ if __name__ == "__main__":
         exit(1)
 
     try:
-        with socketserver.TCPServer(("", PORT), DynamicServerHandler) as httpd:
+        with ThreadedTCPServer(("", PORT), DynamicServerHandler) as httpd:
             print(f"Starting server... Listening on port {PORT}.")
             print(f"Open http://localhost/ in your web browser.")
             print("Press Ctrl+C to stop the server.")
