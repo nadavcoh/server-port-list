@@ -200,8 +200,8 @@ def generate_html(config, servers, request_host):
                     favicon_url = s.get('iconurl') or get_favicon_url(primary_link)
                     if favicon_url:
                         s['iconurl'] = favicon_url  # save with localhost — rewrite only at render time
-                        # Rewrite localhost/127.0.0.1 so remote clients (e.g. iOS) can reach the icon
-                        favicon_url = re.sub(r'https?://(?:localhost|127\.0\.0\.1)', lambda m: m.group(0).split('://')[0] + '://' + base_host, favicon_url)
+                        # Rewrite whatever host is in the icon URL to the requesting host so any client can reach it
+                        favicon_url = re.sub(r'(https?://)([^/:]+)', lambda m: m.group(1) + base_host, favicon_url, count=1)
                 proto_badge = protocol.upper()
             else:
                 # Unknown protocol — offer both
