@@ -200,8 +200,13 @@ def generate_html(config, servers, request_host):
                     favicon_url = s.get('iconurl') or get_favicon_url(primary_link)
                     if favicon_url:
                         s['iconurl'] = favicon_url  # save with localhost — rewrite only at render time
-                        # Rewrite whatever host is in the icon URL to the requesting host so any client can reach it
-                        favicon_url = re.sub(r'(https?://)([^/:]+)', lambda m: m.group(1) + base_host, favicon_url, count=1)
+                        # Rewrite local/private hosts to base_host so any client on the network can reach the icon.
+                        # External URLs (e.g. Google favicon service) are left untouched.
+                        _LOCAL = re.compile(r'^(localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)$')
+                        def _rewrite_host(m):
+                            host = m.group(2)
+                            return m.group(1) + (base_host if _LOCAL.match(host) else host)
+                        favicon_url = re.sub(r'(https?://)([^/:]+)', _rewrite_host, favicon_url, count=1)
                 proto_badge = protocol.upper()
             else:
                 # Unknown protocol — offer both
