@@ -195,13 +195,14 @@ def generate_html(config, servers, request_host):
         if running:
             if protocol in ('http', 'https'):
                 primary_link = f"{protocol}://{link_host}:{port}"
-                # Use cached iconurl, otherwise fetch
+                # Icon fetch always uses localhost — the fetch runs on the server itself.
+                # base_host (the request hostname) may not resolve locally.
+                fetch_link = f"{protocol}://localhost:{port}"
                 if s.get('hidden', '').lower() != 'true':
-                    favicon_url = s.get('iconurl') or get_favicon_url(primary_link)
+                    favicon_url = s.get('iconurl') or get_favicon_url(fetch_link)
                     if favicon_url:
-                        s['iconurl'] = favicon_url  # save with localhost — rewrite only at render time
+                        s['iconurl'] = favicon_url  # stored with localhost, rewritten at render time
                         # Rewrite local/private hosts to base_host so any client on the network can reach the icon.
-                        # External URLs (e.g. Google favicon service) are left untouched.
                         _LOCAL = re.compile(r'^(localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)$')
                         def _rewrite_host(m):
                             host = m.group(2)
