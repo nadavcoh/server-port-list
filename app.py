@@ -10,538 +10,714 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 PORT = 80
-ANNOTATIONS_FILE = 'annotations.csv'
-CSV_KEY_FIELDS = ['process', 'port', 'cmdline', 'cwd']
-CONFIG_PROCESS_NAME = '##CONFIG##'
+ANNOTATIONS_FILE = ‘annotations.csv’
+CSV_KEY_FIELDS = [‘process’, ‘port’, ‘cmdline’, ‘cwd’]
+CONFIG_PROCESS_NAME = ‘##CONFIG##’
+CACHE_NAME = ‘app-launcher-v1’
+
+MANIFEST_JSON = “””{
+“name”: “App Launcher”,
+“short_name”: “Launcher”,
+“start_url”: “/”,
+“display”: “standalone”,
+“background_color”: “#0f0f13”,
+“theme_color”: “#0f0f13”,
+“icons”: [
+{
+“src”: “/icon.svg”,
+“sizes”: “any”,
+“type”: “image/svg+xml”,
+“purpose”: “any maskable”
+}
+]
+}”””
+
+ICON_SVG = “””<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<rect width="512" height="512" rx="112" fill="#0f0f13"/>
+<rect x="80"  y="80"  width="140" height="140" rx="28" fill="#4a4aff"/>
+<rect x="292" y="80"  width="140" height="140" rx="28" fill="#9b59b6"/>
+<rect x="80"  y="292" width="140" height="140" rx="28" fill="#9b59b6"/>
+<rect x="292" y="292" width="140" height="140" rx="28" fill="#4a4aff"/>
+</svg>”””
+
+SERVICE_WORKER_JS = “””
+const CACHE = ‘app-launcher-v1’;
+
+self.addEventListener(‘install’, event => { self.skipWaiting(); });
+self.addEventListener(‘activate’, event => { event.waitUntil(clients.claim()); });
+
+// Cache-first: serve from cache immediately, update cache in background
+self.addEventListener(‘fetch’, event => {
+if (event.request.method !== ‘GET’) return;
+
+// For icon images (potentially cross-origin), use no-cors so they can be cached
+const isIcon = event.request.destination === ‘image’
+|| /.(ico|png|svg|webp|jpg|jpeg)$/i.test(new URL(event.request.url).pathname);
+
+const req = isIcon
+? new Request(event.request.url, { mode: ‘no-cors’, credentials: ‘omit’ })
+: event.request;
+
+event.respondWith(
+caches.open(CACHE).then(cache =>
+cache.match(req).then(cached => {
+if (cached) return cached;
+// Not in cache yet — fetch, store, and return
+return fetch(req).then(response => {
+if (response.ok || response.type === ‘opaque’) {
+cache.put(req, response.clone());
+}
+return response;
+});
+})
+)
+);
+});
+
+// Manual cache clear triggered from the page via postMessage({action:‘clearCache’})
+self.addEventListener(‘message’, event => {
+if (event.data && event.data.action === ‘clearCache’) {
+caches.delete(CACHE).then(() => {
+event.source.postMessage({action: ‘cacheCleared’});
+});
+}
+});
+“””
 
 def get_key(server_dict):
-    """Creates a stable key tuple from a server dictionary."""
-    return tuple(server_dict.get(field, 'N/A') for field in CSV_KEY_FIELDS)
+“”“Creates a stable key tuple from a server dictionary.”””
+return tuple(server_dict.get(field, ‘N/A’) for field in CSV_KEY_FIELDS)
 
 def load_config_and_servers_from_csv():
-    """Loads config and server records from the CSV file."""
-    config = {'hide_columns': set()}
-    servers = {}
-    if not os.path.exists(ANNOTATIONS_FILE):
-        return config, servers
-    try:
-        with open(ANNOTATIONS_FILE, mode='r', newline='', encoding='utf-8') as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                if row.get('process') == CONFIG_PROCESS_NAME:
-                    # The 'annotation' field of the config row holds comma-separated column names to hide
-                    config['hide_columns'] = {col.strip().lower() for col in row.get('annotation', '').split(',')}
-                else:
-                    servers[get_key(row)] = row
-    except (IOError, csv.Error) as e:
-        print(f"Error loading CSV data: {e}")
-    return config, servers
+“”“Loads config and server records from the CSV file.”””
+config = {‘hide_columns’: set()}
+servers = {}
+if not os.path.exists(ANNOTATIONS_FILE):
+return config, servers
+try:
+with open(ANNOTATIONS_FILE, mode=‘r’, newline=’’, encoding=‘utf-8’) as csvfile:
+reader = csv.DictReader(csvfile)
+for row in reader:
+if row.get(‘process’) == CONFIG_PROCESS_NAME:
+# The ‘annotation’ field of the config row holds comma-separated column names to hide
+config[‘hide_columns’] = {col.strip().lower() for col in row.get(‘annotation’, ‘’).split(’,’)}
+else:
+servers[get_key(row)] = row
+except (IOError, csv.Error) as e:
+print(f”Error loading CSV data: {e}”)
+return config, servers
 
 def save_servers_to_csv(config, servers):
-    """Saves config and servers (running or annotated) to the CSV file."""
-    try:
-        with open(ANNOTATIONS_FILE, mode='w', newline='', encoding='utf-8') as csvfile:
-            # Add new control fields to the header
-            fieldnames = ['process', 'pid', 'cmdline', 'cwd', 'ip', 'port', 'annotation', 'hidden', 'protocol', 'iconurl']
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
-            writer.writeheader()
-            
-            # Write the config row
-            writer.writerow({
-                'process': CONFIG_PROCESS_NAME,
-                'annotation': ','.join(config.get('hide_columns', set()))
-            })
+“”“Saves config and servers (running or annotated) to the CSV file.”””
+try:
+with open(ANNOTATIONS_FILE, mode=‘w’, newline=’’, encoding=‘utf-8’) as csvfile:
+# Add new control fields to the header
+fieldnames = [‘process’, ‘pid’, ‘cmdline’, ‘cwd’, ‘ip’, ‘port’, ‘annotation’, ‘hidden’, ‘protocol’, ‘iconurl’, ‘pagetitle’]
+writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction=‘ignore’)
+writer.writeheader()
 
-            # Filter out transient entries and write server rows
-            servers_to_save = [s for s in servers if s.get('status') == 'Running' or s.get('annotation') or s.get('hidden', '').lower() == 'true']
-            writer.writerows(servers_to_save)
-    except (IOError, csv.Error) as e:
-        print(f"Error saving CSV data: {e}")
+```
+        # Write the config row
+        writer.writerow({
+            'process': CONFIG_PROCESS_NAME,
+            'annotation': ','.join(config.get('hide_columns', set()))
+        })
+
+        # Filter out transient entries and write server rows
+        servers_to_save = [s for s in servers if s.get('status') == 'Running' or s.get('annotation') or s.get('hidden', '').lower() == 'true']
+        writer.writerows(servers_to_save)
+except (IOError, csv.Error) as e:
+    print(f"Error saving CSV data: {e}")
+```
 
 def get_running_servers():
-    """Queries the system for currently listening ports."""
-    # (This function is unchanged)
-    servers = []
-    seen = set()
-    for conn in psutil.net_connections(kind='inet'):
-        if conn.status == psutil.CONN_LISTEN and conn.laddr.port and conn.pid:
-            identifier = (conn.pid, conn.laddr.port)
-            if identifier not in seen:
-                seen.add(identifier)
-                process_name, cmdline, cwd = "System/Unknown", "N/A", "N/A"
-                try:
-                    p = psutil.Process(conn.pid)
-                    process_name = p.name()
-                    cmdline = ' '.join(p.cmdline())
-                    cwd = p.cwd()
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    pass
-                servers.append({'ip': conn.laddr.ip, 'port': str(conn.laddr.port), 'pid': str(conn.pid), 'process': process_name, 'cmdline': cmdline, 'cwd': cwd})
-    return servers
+“”“Queries the system for currently listening ports.”””
+# (This function is unchanged)
+servers = []
+seen = set()
+for conn in psutil.net_connections(kind=‘inet’):
+if conn.status == psutil.CONN_LISTEN and conn.laddr.port and conn.pid:
+identifier = (conn.pid, conn.laddr.port)
+if identifier not in seen:
+seen.add(identifier)
+process_name, cmdline, cwd = “System/Unknown”, “N/A”, “N/A”
+try:
+p = psutil.Process(conn.pid)
+process_name = p.name()
+cmdline = ’ ’.join(p.cmdline())
+cwd = p.cwd()
+except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+pass
+servers.append({‘ip’: conn.laddr.ip, ‘port’: str(conn.laddr.port), ‘pid’: str(conn.pid), ‘process’: process_name, ‘cmdline’: cmdline, ‘cwd’: cwd})
+return servers
 
-def get_favicon_url(link):
-    """
-    Attempts to find the largest icon URL for a given server link.
-    Strategy:
-      1. Fetch the page HTML and parse all <link rel="icon|apple-touch-icon|..."> tags.
-         Pick the one with the largest declared size (e.g. sizes="192x192").
-      2. Fall back to /favicon.ico if no <link> icons found.
-      3. Fall back to Google's favicon service as a last resort.
-    """
-    def _parse_size(sizes_attr):
-        """Return the largest dimension integer from a sizes attribute like '32x32 64x64'."""
-        best = 0
-        for token in sizes_attr.lower().split():
-            if 'x' in token:
-                try:
-                    w, h = token.split('x', 1)
-                    best = max(best, int(w), int(h))
-                except ValueError:
-                    pass
-        return best
+def fetch_page_info(link):
+“””
+Fetches a server’s page and extracts (favicon_url, page_title).
+Returns (None, None) if unreachable.
+“””
+def _parse_size(sizes_attr):
+“”“Return the largest dimension integer from a sizes attribute like ‘32x32 64x64’.”””
+best = 0
+for token in sizes_attr.lower().split():
+if ‘x’ in token:
+try:
+w, h = token.split(‘x’, 1)
+best = max(best, int(w), int(h))
+except ValueError:
+pass
+return best
 
-    def _make_absolute(href, base):
-        if href.startswith('http://') or href.startswith('https://'):
-            return href
-        if href.startswith('//'):
-            scheme = base.split('://')[0]
-            return f"{scheme}:{href}"
-        if href.startswith('/'):
-            parts = base.split('://', 1)
-            host_part = parts[1].split('/')[0] if len(parts) > 1 else ''
-            return f"{parts[0]}://{host_part}{href}"
-        return f"{base.rstrip('/')}/{href}"
+```
+def _make_absolute(href, base):
+    if href.startswith('http://') or href.startswith('https://'):
+        return href
+    if href.startswith('//'):
+        scheme = base.split('://')[0]
+        return f"{scheme}:{href}"
+    if href.startswith('/'):
+        parts = base.split('://', 1)
+        host_part = parts[1].split('/')[0] if len(parts) > 1 else ''
+        return f"{parts[0]}://{host_part}{href}"
+    return f"{base.rstrip('/')}/{href}"
 
-    try:
-        response = requests.get(link, timeout=2, allow_redirects=True, verify=False)
-        if response.status_code == 200:
-            page_html = response.text
-            # Use the final URL after any redirects as the base for resolving relative hrefs
-            final_base = response.url
+try:
+    response = requests.get(link, timeout=2, allow_redirects=True, verify=False)
+    if response.status_code == 200:
+        page_html = response.text
+        final_base = response.url
 
-            full_link_tags = re.findall(r'<link\b[^>]*>', page_html, re.IGNORECASE)
+        # Extract page title
+        title_match = re.search(r'<title[^>]*>([^<]+)</title>', page_html, re.IGNORECASE)
+        page_title = title_match.group(1).strip() if title_match else None
 
-            best_url = None
-            best_size = -1
+        full_link_tags = re.findall(r'<link\b[^>]*>', page_html, re.IGNORECASE)
 
-            for tag in full_link_tags:
-                rel_match = re.search(r'\brel=["\']([^"\']*)["\']', tag, re.IGNORECASE)
-                if not rel_match:
-                    continue
-                rel = rel_match.group(1).lower()
-                if not any(k in rel for k in ('icon', 'shortcut', 'apple-touch')):
-                    continue
+        best_url = None
+        best_size = -1
 
-                href_match = re.search(r'\bhref=["\']([^"\']+)["\']', tag, re.IGNORECASE)
-                if not href_match:
-                    continue
-                href = href_match.group(1)
+        for tag in full_link_tags:
+            rel_match = re.search(r'\brel=["\']([^"\']*)["\']', tag, re.IGNORECASE)
+            if not rel_match:
+                continue
+            rel = rel_match.group(1).lower()
+            if not any(k in rel for k in ('icon', 'shortcut', 'apple-touch')):
+                continue
 
-                sizes_match = re.search(r'\bsizes=["\']([^"\']+)["\']', tag, re.IGNORECASE)
-                size = _parse_size(sizes_match.group(1)) if sizes_match else 0
+            href_match = re.search(r'\bhref=["\']([^"\']+)["\']', tag, re.IGNORECASE)
+            if not href_match:
+                continue
+            href = href_match.group(1)
 
-                if size > best_size:
-                    best_size = size
-                    best_url = _make_absolute(href, final_base)
+            sizes_match = re.search(r'\bsizes=["\']([^"\']+)["\']', tag, re.IGNORECASE)
+            size = _parse_size(sizes_match.group(1)) if sizes_match else 0
 
-            if best_url:
-                return best_url
-    except requests.RequestException:
-        pass
+            if size > best_size:
+                best_size = size
+                best_url = _make_absolute(href, final_base)
 
-    # Fallback 1: /favicon.ico
-    try:
-        favicon_url = f"{link}/favicon.ico"
-        response = requests.get(favicon_url, timeout=1, verify=False)
-        if response.status_code == 200 and response.content:
-            return favicon_url
-    except requests.RequestException:
-        pass
+        if best_url:
+            return best_url, page_title
+except requests.RequestException:
+    pass
 
-    # Fallback 2: Google favicon service
-    try:
-        domain = link.split('//')[1].split(':')[0].split('/')[0]
-        google_favicon_url = f"https://www.google.com/s2/favicons?sz=64&domain={domain}"
-        response = requests.get(google_favicon_url, timeout=1, verify=False)
-        if response.status_code == 200 and response.content:
-            return google_favicon_url
-    except requests.RequestException:
-        pass
+# Fallback 1: /favicon.ico
+try:
+    favicon_url = f"{link}/favicon.ico"
+    response = requests.get(favicon_url, timeout=1, verify=False)
+    if response.status_code == 200 and response.content:
+        return favicon_url, None
+except requests.RequestException:
+    pass
 
-    return None
+# Fallback 2: Google favicon service
+try:
+    domain = link.split('//')[1].split(':')[0].split('/')[0]
+    google_favicon_url = f"https://www.google.com/s2/favicons?sz=64&domain={domain}"
+    response = requests.get(google_favicon_url, timeout=1, verify=False)
+    if response.status_code == 200 and response.content:
+        return google_favicon_url, None
+except requests.RequestException:
+    pass
+
+return None, None
+```
 
 def fetch_icons_for_servers(servers):
-    """Fetches and caches iconurl for any running server that doesn't have one yet."""
-    for s in servers:
-        if s.get('hidden', '').lower() == 'true':
-            continue
-        if s.get('iconurl'):
-            continue
-        if s.get('status') != 'Running':
-            continue
-        protocol = s.get('protocol', '').lower()
-        if protocol not in ('http', 'https'):
-            continue
-        port = s.get('port', '')
-        fetch_link = f"{protocol}://localhost:{port}"
-        favicon_url = get_favicon_url(fetch_link)
-        if favicon_url:
-            s['iconurl'] = favicon_url
+“”“Fetches and caches iconurl and pagetitle for any running server that doesn’t have them yet.”””
+for s in servers:
+if s.get(‘hidden’, ‘’).lower() == ‘true’:
+continue
+if s.get(‘iconurl’) and s.get(‘pagetitle’):
+continue
+if s.get(‘status’) != ‘Running’:
+continue
+protocol = s.get(‘protocol’, ‘’).lower()
+if protocol not in (‘http’, ‘https’):
+continue
+port = s.get(‘port’, ‘’)
+fetch_link = f”{protocol}://localhost:{port}”
+favicon_url, page_title = fetch_page_info(fetch_link)
+if favicon_url:
+s[‘iconurl’] = favicon_url
+if page_title and not s.get(‘pagetitle’):
+s[‘pagetitle’] = page_title
 
 def generate_html(config, servers, request_host):
-    """Renders servers as a visual app-picker / home-screen grid."""
-    base_host = request_host.split(':')[0] if request_host else "localhost"
+“”“Renders servers as a visual app-picker / home-screen grid.”””
+base_host = request_host.split(’:’)[0] if request_host else “localhost”
 
-    cards_html = ""
-    for s in servers:
-        status   = s.get('status', 'N/A')
-        running  = status == 'Running'
-        port     = s.get('port', '')
-        protocol = s.get('protocol', '').lower()
-        ip       = s.get('ip', '')
-        label    = html.escape(s.get('annotation') or s.get('process', 'Unknown'))
-        process  = html.escape(s.get('process', ''))
-        pid      = html.escape(s.get('pid', ''))
-        cmdline  = html.escape(s.get('cmdline', ''))
-        cwd      = html.escape(s.get('cwd', ''))
+```
+cards_html = ""
+for s in servers:
+    status   = s.get('status', 'N/A')
+    running  = status == 'Running'
+    port     = s.get('port', '')
+    protocol = s.get('protocol', '').lower()
+    ip       = s.get('ip', '')
+    label    = html.escape(s.get('annotation') or s.get('pagetitle') or s.get('process', 'Unknown'))
+    process  = html.escape(s.get('process', ''))
+    pid      = html.escape(s.get('pid', ''))
+    cmdline  = html.escape(s.get('cmdline', ''))
+    cwd      = html.escape(s.get('cwd', ''))
 
-        link_host = "localhost" if ip in ["127.0.0.1", "::1"] else base_host
-        favicon_url = None
-        primary_link = ""
-        proto_badge = ""
+    link_host = "localhost" if ip in ["127.0.0.1", "::1"] else base_host
+    favicon_url = None
+    primary_link = ""
+    proto_badge = ""
 
-        if running:
-            if protocol in ('http', 'https'):
-                primary_link = f"{protocol}://{link_host}:{port}"
-                # iconurl was already fetched and cached before this function was called
-                raw_favicon = s.get('iconurl')
-                if raw_favicon:
-                    # Rewrite local/private hosts to base_host so any client can load the icon
-                    _LOCAL = re.compile(r'^(localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)$')
-                    def _rewrite_host(m):
-                        host = m.group(2)
-                        return m.group(1) + (base_host if _LOCAL.match(host) else host)
-                    favicon_url = re.sub(r'(https?://)([^/:]+)', _rewrite_host, raw_favicon, count=1)
-                proto_badge = protocol.upper()
-            else:
-                # Unknown protocol — offer both
-                primary_link = f"http://{link_host}:{port}"
-                proto_badge = "HTTP/S"
-
-        # Icon: image if we have one, otherwise a coloured initial
-        if favicon_url:
-            icon_html = f'<img class="app-icon-img" src="{html.escape(favicon_url)}" alt="" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'">'
-            # Fallback initial shown via onerror
-            initial = label[0].upper() if label else '?'
-            icon_html += f'<div class="app-icon-initial" style="display:none">{initial}</div>'
+    if running:
+        if protocol in ('http', 'https'):
+            primary_link = f"{protocol}://{link_host}:{port}"
+            # iconurl was already fetched and cached before this function was called
+            raw_favicon = s.get('iconurl')
+            if raw_favicon:
+                # Rewrite local/private hosts to base_host so any client can load the icon
+                _LOCAL = re.compile(r'^(localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)$')
+                def _rewrite_host(m):
+                    host = m.group(2)
+                    return m.group(1) + (base_host if _LOCAL.match(host) else host)
+                favicon_url = re.sub(r'(https?://)([^/:]+)', _rewrite_host, raw_favicon, count=1)
+            proto_badge = protocol.upper()
         else:
-            initial = label[0].upper() if label else '?'
-            icon_html = f'<div class="app-icon-initial">{initial}</div>'
+            # Unknown protocol — offer both
+            primary_link = f"http://{link_host}:{port}"
+            proto_badge = "HTTP/S"
 
-        # Status dot
-        dot_class = "dot-running" if running else "dot-offline"
-        dot_title = "Running" if running else "Not Running"
+    # Icon: image if we have one, otherwise a coloured initial
+    if favicon_url:
+        icon_html = f'<img class="app-icon-img" src="{html.escape(favicon_url)}" alt="" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'">'
+        # Fallback initial shown via onerror
+        initial = label[0].upper() if label else '?'
+        icon_html += f'<div class="app-icon-initial" style="display:none">{initial}</div>'
+    else:
+        initial = label[0].upper() if label else '?'
+        icon_html = f'<div class="app-icon-initial">{initial}</div>'
 
-        # Tooltip detail
-        tooltip = f"Port: {port}"
-        if pid:      tooltip += f" | PID: {pid}"
-        if process:  tooltip += f" | {process}"
-        if cwd and cwd != 'N/A': tooltip += f" | {cwd}"
-        if cmdline and cmdline != 'N/A': tooltip += f" | {cmdline}"
+    # Status dot
+    dot_class = "dot-running" if running else "dot-offline"
+    dot_title = "Running" if running else "Not Running"
 
-        # Protocol links for unknown-protocol running servers
-        extra_links = ""
-        if running and protocol not in ('http', 'https'):
-            http_l  = f"http://{link_host}:{port}"
-            https_l = f"https://{link_host}:{port}"
-            extra_links = (f'<div class="proto-links">'
-                           f'<a href="{http_l}" target="_blank">http</a>'
-                           f'<a href="{https_l}" target="_blank">https</a>'
-                           f'</div>')
+    # Tooltip detail
+    tooltip = f"Port: {port}"
+    if pid:      tooltip += f" | PID: {pid}"
+    if process:  tooltip += f" | {process}"
+    if cwd and cwd != 'N/A': tooltip += f" | {cwd}"
+    if cmdline and cmdline != 'N/A': tooltip += f" | {cmdline}"
 
-        card_class = "app-card" + ("" if running else " app-card-offline")
+    # Protocol links for unknown-protocol running servers
+    extra_links = ""
+    if running and protocol not in ('http', 'https'):
+        http_l  = f"http://{link_host}:{port}"
+        https_l = f"https://{link_host}:{port}"
+        extra_links = (f'<div class="proto-links">'
+                       f'<a href="{http_l}" target="_blank">http</a>'
+                       f'<a href="{https_l}" target="_blank">https</a>'
+                       f'</div>')
 
-        if primary_link and running and protocol in ('http', 'https'):
-            card_inner = (f'<a class="{card_class}" href="{primary_link}" target="_blank" title="{html.escape(tooltip)}">'
-                          f'  <span class="status-dot {dot_class}" title="{dot_title}"></span>'
-                          f'  <div class="app-icon">{icon_html}</div>'
-                          f'  <div class="app-label">{label}</div>'
-                          f'  <div class="app-port">:{port}'
-                          f'    {f"<span class=\'proto-tag\'>{proto_badge}</span>" if proto_badge else ""}'
-                          f'  </div>'
-                          f'</a>')
-        else:
-            card_inner = (f'<div class="{card_class}" title="{html.escape(tooltip)}">'
-                          f'  <span class="status-dot {dot_class}" title="{dot_title}"></span>'
-                          f'  <div class="app-icon">{icon_html}</div>'
-                          f'  <div class="app-label">{label}</div>'
-                          f'  <div class="app-port">:{port}'
-                          f'    {f"<span class=\'proto-tag\'>{proto_badge}</span>" if proto_badge else ""}'
-                          f'  </div>'
-                          f'  {extra_links}'
-                          f'</div>')
+    card_class = "app-card" + ("" if running else " app-card-offline")
 
-        cards_html += card_inner
+    if primary_link and running and protocol in ('http', 'https'):
+        card_inner = (f'<a class="{card_class}" href="{primary_link}" target="_blank" title="{html.escape(tooltip)}">'
+                      f'  <span class="status-dot {dot_class}" title="{dot_title}"></span>'
+                      f'  <div class="app-icon">{icon_html}</div>'
+                      f'  <div class="app-label">{label}</div>'
+                      f'  <div class="app-port">:{port}'
+                      f'    {f"<span class=\'proto-tag\'>{proto_badge}</span>" if proto_badge else ""}'
+                      f'  </div>'
+                      f'</a>')
+    else:
+        card_inner = (f'<div class="{card_class}" title="{html.escape(tooltip)}">'
+                      f'  <span class="status-dot {dot_class}" title="{dot_title}"></span>'
+                      f'  <div class="app-icon">{icon_html}</div>'
+                      f'  <div class="app-label">{label}</div>'
+                      f'  <div class="app-port">:{port}'
+                      f'    {f"<span class=\'proto-tag\'>{proto_badge}</span>" if proto_badge else ""}'
+                      f'  </div>'
+                      f'  {extra_links}'
+                      f'</div>')
 
-    return f"""<!DOCTYPE html>
+    cards_html += card_inner
+
+return f"""<!DOCTYPE html>
+```
+
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>App Launcher</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0f0f13">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="App Launcher">
+<link rel="apple-touch-icon" href="/icon.svg">
 <style>
   *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
 
-  body {{
-    font-family: 'Segoe UI', system-ui, sans-serif;
-    background: #0f0f13;
-    color: #e8e8f0;
-    min-height: 100vh;
-    padding: 32px 24px 48px;
-  }}
+body {{
+font-family: ‘Segoe UI’, system-ui, sans-serif;
+background: #0f0f13;
+color: #e8e8f0;
+min-height: 100vh;
+padding: 32px 24px 48px;
+}}
 
-  header {{
-    display: flex;
-    align-items: baseline;
-    gap: 12px;
-    margin-bottom: 32px;
-  }}
-  header h1 {{
-    font-size: 1.25rem;
-    font-weight: 600;
-    color: #fff;
-    letter-spacing: .02em;
-  }}
-  header span {{
-    font-size: .8rem;
-    color: #555;
-  }}
+header {{
+display: flex;
+align-items: baseline;
+gap: 12px;
+margin-bottom: 32px;
+}}
+header h1 {{
+font-size: 1.25rem;
+font-weight: 600;
+color: #fff;
+letter-spacing: .02em;
+}}
+header span {{
+font-size: .8rem;
+color: #555;
+}}
 
-  .grid {{
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-    gap: 18px;
-  }}
+.grid {{
+display: grid;
+grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+gap: 18px;
+}}
 
-  /* ── shared card base ── */
-  .app-card, a.app-card {{
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-    padding: 20px 10px 16px;
-    border-radius: 18px;
-    background: #1a1a24;
-    border: 1px solid #2a2a38;
-    text-decoration: none;
-    color: inherit;
-    cursor: default;
-    transition: transform .15s, background .15s, box-shadow .15s;
-    user-select: none;
-  }}
-  a.app-card {{
-    cursor: pointer;
-  }}
-  a.app-card:hover {{
-    transform: translateY(-4px) scale(1.03);
-    background: #22223a;
-    box-shadow: 0 8px 32px rgba(0,0,0,.45);
-    border-color: #4a4aff44;
-  }}
-  a.app-card:active {{
-    transform: translateY(-1px) scale(1.01);
-  }}
+/* ── shared card base ── */
+.app-card, a.app-card {{
+position: relative;
+display: flex;
+flex-direction: column;
+align-items: center;
+gap: 10px;
+padding: 20px 10px 16px;
+border-radius: 18px;
+background: #1a1a24;
+border: 1px solid #2a2a38;
+text-decoration: none;
+color: inherit;
+cursor: default;
+transition: transform .15s, background .15s, box-shadow .15s;
+user-select: none;
+}}
+a.app-card {{
+cursor: pointer;
+}}
+a.app-card:hover {{
+transform: translateY(-4px) scale(1.03);
+background: #22223a;
+box-shadow: 0 8px 32px rgba(0,0,0,.45);
+border-color: #4a4aff44;
+}}
+a.app-card:active {{
+transform: translateY(-1px) scale(1.01);
+}}
 
-  .app-card-offline {{
-    opacity: .45;
-    filter: grayscale(.6);
-  }}
+.app-card-offline {{
+opacity: .45;
+filter: grayscale(.6);
+}}
 
-  /* ── icon area ── */
-  .app-icon {{
-    width: 64px;
-    height: 64px;
-    border-radius: 14px;
-    overflow: hidden;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: #25253a;
-    flex-shrink: 0;
-  }}
-  .app-icon-img {{
-    width: 64px;
-    height: 64px;
-    object-fit: contain;
-    border-radius: 14px;
-  }}
-  .app-icon-initial {{
-    width: 64px;
-    height: 64px;
-    border-radius: 14px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 1.8rem;
-    font-weight: 700;
-    color: #fff;
-    background: linear-gradient(135deg, #4a4aff, #9b59b6);
-    flex-shrink: 0;
-  }}
+/* ── icon area ── */
+.app-icon {{
+width: 64px;
+height: 64px;
+border-radius: 14px;
+overflow: hidden;
+display: flex;
+align-items: center;
+justify-content: center;
+background: #25253a;
+flex-shrink: 0;
+}}
+.app-icon-img {{
+width: 64px;
+height: 64px;
+object-fit: contain;
+border-radius: 14px;
+}}
+.app-icon-initial {{
+width: 64px;
+height: 64px;
+border-radius: 14px;
+display: flex;
+align-items: center;
+justify-content: center;
+font-size: 1.8rem;
+font-weight: 700;
+color: #fff;
+background: linear-gradient(135deg, #4a4aff, #9b59b6);
+flex-shrink: 0;
+}}
 
-  /* ── labels ── */
-  .app-label {{
-    font-size: .78rem;
-    font-weight: 500;
-    text-align: center;
-    color: #d0d0e8;
-    line-height: 1.3;
-    max-width: 100%;
-    overflow: hidden;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-  }}
-  .app-port {{
-    font-size: .7rem;
-    color: #666;
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    flex-wrap: wrap;
-    justify-content: center;
-  }}
+/* ── labels ── */
+.app-label {{
+font-size: .78rem;
+font-weight: 500;
+text-align: center;
+color: #d0d0e8;
+line-height: 1.3;
+max-width: 100%;
+overflow: hidden;
+display: -webkit-box;
+-webkit-line-clamp: 2;
+-webkit-box-orient: vertical;
+}}
+.app-port {{
+font-size: .7rem;
+color: #666;
+display: flex;
+align-items: center;
+gap: 5px;
+flex-wrap: wrap;
+justify-content: center;
+}}
 
-  /* ── proto tag ── */
-  .proto-tag {{
-    font-size: .6rem;
-    font-weight: 700;
-    letter-spacing: .05em;
-    padding: 1px 5px;
-    border-radius: 4px;
-    background: #2a2a50;
-    color: #7878ff;
-    text-transform: uppercase;
-  }}
+/* ── proto tag ── */
+.proto-tag {{
+font-size: .6rem;
+font-weight: 700;
+letter-spacing: .05em;
+padding: 1px 5px;
+border-radius: 4px;
+background: #2a2a50;
+color: #7878ff;
+text-transform: uppercase;
+}}
 
-  /* ── proto links (no-protocol cards) ── */
-  .proto-links {{
-    display: flex;
-    gap: 6px;
-    margin-top: 2px;
-  }}
-  .proto-links a {{
-    font-size: .65rem;
-    font-weight: 600;
-    padding: 2px 7px;
-    border-radius: 5px;
-    background: #1e1e38;
-    border: 1px solid #3a3a5a;
-    color: #7878ff;
-    text-decoration: none;
-    cursor: pointer;
-  }}
-  .proto-links a:hover {{ background: #2a2a50; }}
+/* ── proto links (no-protocol cards) ── */
+.proto-links {{
+display: flex;
+gap: 6px;
+margin-top: 2px;
+}}
+.proto-links a {{
+font-size: .65rem;
+font-weight: 600;
+padding: 2px 7px;
+border-radius: 5px;
+background: #1e1e38;
+border: 1px solid #3a3a5a;
+color: #7878ff;
+text-decoration: none;
+cursor: pointer;
+}}
+.proto-links a:hover {{ background: #2a2a50; }}
 
-  /* ── status dot ── */
-  .status-dot {{
-    position: absolute;
-    top: 10px;
-    right: 10px;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }}
-  .dot-running  {{ background: #22c55e; box-shadow: 0 0 6px #22c55e88; }}
-  .dot-offline  {{ background: #444; }}
+/* ── status dot ── */
+.status-dot {{
+position: absolute;
+top: 10px;
+right: 10px;
+width: 8px;
+height: 8px;
+border-radius: 50%;
+flex-shrink: 0;
+}}
+.dot-running  {{ background: #22c55e; box-shadow: 0 0 6px #22c55e88; }}
+.dot-offline  {{ background: #444; }}
 
-  /* ── hint ── */
-  .hint {{
-    margin-top: 40px;
-    font-size: .72rem;
-    color: #333;
-    text-align: center;
-  }}
-  .hint code {{ color: #555; }}
+/* ── hint ── */
+.hint {{
+margin-top: 40px;
+font-size: .72rem;
+color: #333;
+text-align: center;
+}}
+.hint code {{ color: #555; }}
+
+/* ── offline banner ── */
+#offline-banner {{
+display: none;
+position: fixed;
+top: 0; left: 0; right: 0;
+background: #7f1d1d;
+color: #fecaca;
+text-align: center;
+font-size: .8rem;
+padding: 8px 16px;
+z-index: 999;
+}}
+body.offline #offline-banner {{ display: block; }}
+body.offline {{ padding-top: 68px; }}
+
+/* ── refresh button ── */
+.refresh-btn {{
+margin-left: auto;
+background: none;
+border: 1px solid #2a2a38;
+border-radius: 8px;
+color: #555;
+font-size: .75rem;
+padding: 5px 10px;
+cursor: pointer;
+transition: color .15s, border-color .15s;
+}}
+.refresh-btn:hover {{ color: #aaa; border-color: #4a4aff44; }}
+.refresh-btn.clearing {{ color: #4a4aff; }}
 </style>
+
 </head>
 <body>
+<div id="offline-banner">⚠ Server unreachable — showing cached version</div>
 <header>
   <h1>App Launcher</h1>
   <span>edit <code>{ANNOTATIONS_FILE}</code> to annotate &amp; hide entries</span>
+  <button class="refresh-btn" id="refresh-btn" title="Clear cache and reload">↺ Clear cache</button>
 </header>
 <div class="grid">
 {cards_html}
 </div>
 <p class="hint">Tip: set <code>annotation</code> for a friendly name · set <code>protocol</code> to http or https to make a card clickable · set <code>hidden</code> to true to suppress an entry</p>
+
+<script>
+if ('serviceWorker' in navigator) {{
+  navigator.serviceWorker.register('/service-worker.js');
+
+  // Show offline banner when served from cache
+  navigator.serviceWorker.ready.then(() => {{
+    fetch('/', {{ method: 'HEAD', cache: 'no-store' }})
+      .catch(() => document.body.classList.add('offline'));
+  }});
+
+  // Listen for cache-cleared confirmation then reload
+  navigator.serviceWorker.addEventListener('message', e => {{
+    if (e.data && e.data.action === 'cacheCleared') location.reload();
+  }});
+}}
+
+document.getElementById('refresh-btn').addEventListener('click', function() {{
+  this.textContent = '↺ Clearing…';
+  this.classList.add('clearing');
+  if (navigator.serviceWorker.controller) {{
+    navigator.serviceWorker.controller.postMessage({{ action: 'clearCache' }});
+  }} else {{
+    location.reload();
+  }}
+}});
+</script>
+
 </body>
 </html>"""
 
 class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
-    daemon_threads = True
-    allow_reuse_address = True
+daemon_threads = True
+allow_reuse_address = True
 
 class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html; charset=utf-8")
-        self.end_headers()
-        
-        host_header = self.headers.get('Host', 'localhost')
-        
-        config, all_known_servers = load_config_and_servers_from_csv()
-        
-        for key in all_known_servers:
-            all_known_servers[key]['status'] = 'Not Running'
-            all_known_servers[key]['pid'] = '' 
+def do_GET(self):
+path = self.path.split(’?’)[0]
 
-        running_servers = get_running_servers()
-        
-        for r_server in running_servers:
-            key = get_key(r_server)
-            if key in all_known_servers:
-                all_known_servers[key].update(r_server)
-                all_known_servers[key]['status'] = 'Running'
-            else:
-                r_server['status'] = 'Running'
-                all_known_servers[key] = r_server
-        
-        # Filter out hidden rows BEFORE sorting and displaying
-        final_server_list = [s for s in all_known_servers.values() if s.get('hidden', '').lower() != 'true']
-        
-        final_server_list.sort(key=lambda s: (not s.get('annotation'), int(s.get('port', 0))))
+```
+    # ── PWA static assets ──────────────────────────────────────
+    if path == '/manifest.json':
+        self._respond(MANIFEST_JSON, 'application/manifest+json')
+        return
+    if path == '/service-worker.js':
+        self._respond(SERVICE_WORKER_JS, 'application/javascript')
+        return
+    if path == '/icon.svg':
+        self._respond(ICON_SVG, 'image/svg+xml')
+        return
 
-        # Fetch missing icons BEFORE saving so iconurl gets persisted to CSV
-        fetch_icons_for_servers(final_server_list)
+    # ── Main page ──────────────────────────────────────────────
+    self.send_response(200)
+    self.send_header("Content-type", "text/html; charset=utf-8")
+    self.end_headers()
 
-        save_servers_to_csv(config, all_known_servers.values())
-        
-        html_content = generate_html(config, final_server_list, host_header)
-        try:
-            self.wfile.write(html_content.encode('utf-8'))
-        except (ConnectionAbortedError, BrokenPipeError) as e:
-            print(f"[{self.log_date_time_string()}] Connection dropped by {self.client_address[0]}: {e}")
+    host_header = self.headers.get('Host', 'localhost')
+    config, all_known_servers = load_config_and_servers_from_csv()
+    
+    for key in all_known_servers:
+        all_known_servers[key]['status'] = 'Not Running'
+        all_known_servers[key]['pid'] = '' 
 
-    def log_message(self, format, *args):
-        print(f"[{self.log_date_time_string()}] Served dynamic list to {self.client_address[0]}")
-
-if __name__ == "__main__":
-    if 'psutil' not in globals():
-        print("ERROR: The 'psutil' library is not installed.")
-        exit(1)
-
-    try:
-        with ThreadedTCPServer(("", PORT), DynamicServerHandler) as httpd:
-            print(f"Starting server... Listening on port {PORT}.")
-            print(f"Open http://localhost/ in your web browser.")
-            print("Press Ctrl+C to stop the server.")
-            httpd.serve_forever()
-    except PermissionError:
-        print(f"\nERROR: Permission denied to bind to port {PORT}.")
-    except OSError as e:
-        if e.errno == 10048:
-            print(f"\nERROR: Port {PORT} is already in use.")
+    running_servers = get_running_servers()
+    
+    for r_server in running_servers:
+        key = get_key(r_server)
+        if key in all_known_servers:
+            all_known_servers[key].update(r_server)
+            all_known_servers[key]['status'] = 'Running'
         else:
-            print(f"\nOS Error: {e}")
+            r_server['status'] = 'Running'
+            all_known_servers[key] = r_server
+    
+    # Filter out hidden rows BEFORE sorting and displaying
+    final_server_list = [s for s in all_known_servers.values() if s.get('hidden', '').lower() != 'true']
+    
+    final_server_list.sort(key=lambda s: (not s.get('annotation'), int(s.get('port', 0))))
+
+    # Fetch missing icons BEFORE saving so iconurl gets persisted to CSV
+    fetch_icons_for_servers(final_server_list)
+
+    save_servers_to_csv(config, all_known_servers.values())
+    
+    html_content = generate_html(config, final_server_list, host_header)
+    try:
+        self.wfile.write(html_content.encode('utf-8'))
+    except (ConnectionAbortedError, BrokenPipeError) as e:
+        print(f"[{self.log_date_time_string()}] Connection dropped by {self.client_address[0]}: {e}")
+
+def log_message(self, format, *args):
+    print(f"[{self.log_date_time_string()}] Served dynamic list to {self.client_address[0]}")
+
+def _respond(self, body, content_type):
+    encoded = body.encode('utf-8')
+    self.send_response(200)
+    self.send_header('Content-Type', content_type)
+    self.send_header('Content-Length', str(len(encoded)))
+    self.send_header('Cache-Control', 'no-cache')
+    self.end_headers()
+    try:
+        self.wfile.write(encoded)
+    except (ConnectionAbortedError, BrokenPipeError) as e:
+        print(f"[{self.log_date_time_string()}] Connection dropped by {self.client_address[0]}: {e}")
+```
+
+if **name** == “**main**”:
+if ‘psutil’ not in globals():
+print(“ERROR: The ‘psutil’ library is not installed.”)
+exit(1)
+
+```
+try:
+    with ThreadedTCPServer(("", PORT), DynamicServerHandler) as httpd:
+        print(f"Starting server... Listening on port {PORT}.")
+        print(f"Open http://localhost/ in your web browser.")
+        print("Press Ctrl+C to stop the server.")
+        httpd.serve_forever()
+except PermissionError:
+    print(f"\nERROR: Permission denied to bind to port {PORT}.")
+except OSError as e:
+    if e.errno == 10048:
+        print(f"\nERROR: Port {PORT} is already in use.")
+    else:
+        print(f"\nOS Error: {e}")
+```
