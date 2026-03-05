@@ -5,11 +5,13 @@ import html
 import csv
 import os
 import re
+import ssl
+import argparse
 import requests
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-PORT = 80
+PORT = 443
 ANNOTATIONS_FILE = 'annotations.csv'
 CSV_KEY_FIELDS = ['process', 'port', 'cmdline', 'cwd']
 CONFIG_PROCESS_NAME = '##CONFIG##'
@@ -40,7 +42,7 @@ ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <rect x="292" y="292" width="140" height="140" rx="28" fill="#4a4aff"/>
 </svg>"""
 
-SERVICE_WORKER_JS = """
+SERVICE_WORKER_JS = r"""
 const CACHE = 'app-launcher-v1';
 
 self.addEventListener('install', event => { self.skipWaiting(); });
@@ -607,8 +609,14 @@ if ('serviceWorker' in navigator) {{
 document.getElementById('refresh-btn').addEventListener('click', function() {{
   this.textContent = '↺ Clearing…';
   this.classList.add('clearing');
-  if (navigator.serviceWorker.controller) {{
-    navigator.serviceWorker.controller.postMessage({{ action: 'clearCache' }});
+  if ('serviceWorker' in navigator) {{
+    navigator.serviceWorker.ready.then(reg => {{
+      if (reg.active) {{
+        reg.active.postMessage({{ action: 'clearCache' }});
+      }} else {{
+        location.reload();
+      }}
+    }});
   }} else {{
     location.reload();
   }}
@@ -691,14 +699,28 @@ class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
             print(f"[{self.log_date_time_string()}] Connection dropped by {self.client_address[0]}: {e}")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='App Launcher - HTTPS server')
+    parser.add_argument('--cert', default='cert.pem', help='Path to TLS certificate file (default: cert.pem)')
+    parser.add_argument('--key',  default='key.pem',  help='Path to TLS private key file (default: key.pem)')
+    parser.add_argument('--port', type=int, default=PORT, help=f'Port to listen on (default: {PORT})')
+    args = parser.parse_args()
+
     if 'psutil' not in globals():
         print("ERROR: The 'psutil' library is not installed.")
         exit(1)
 
     try:
-        with ThreadedTCPServer(("", PORT), DynamicServerHandler) as httpd:
-            print(f"Starting server... Listening on port {PORT}.")
-            print(f"Open http://localhost/ in your web browser.")
+        if not os.path.exists(args.cert) or not os.path.exists(args.key):
+            print(f"\nERROR: Certificate files not found. Specify with --cert and --key.")
+            exit(1)
+
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(args.cert, args.key)
+
+        with ThreadedTCPServer(("", args.port), DynamicServerHandler) as httpd:
+            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+            print(f"Starting server... Listening on port {args.port} (HTTPS).")
+            print(f"Open https://localhost:{args.port}/" if args.port != 443 else "Open https://localhost/ in your web browser.")
             print("Press Ctrl+C to stop the server.")
             httpd.serve_forever()
     except PermissionError:
