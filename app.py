@@ -6,6 +6,7 @@ import csv
 import os
 import re
 import ssl
+import hashlib
 import argparse
 import requests
 import urllib3
@@ -16,6 +17,8 @@ ANNOTATIONS_FILE = 'annotations.csv'
 CSV_KEY_FIELDS = ['process', 'port', 'cmdline', 'cwd']
 CONFIG_PROCESS_NAME = '##CONFIG##'
 CACHE_NAME = 'app-launcher-v1'
+ICON_CACHE_DIR = 'icon_cache'
+os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 
 MANIFEST_JSON = """{
   "name": "App Launcher",
@@ -286,15 +289,10 @@ def generate_html(config, servers, request_host):
         if running:
             if protocol in ('http', 'https'):
                 primary_link = f"{protocol}://{link_host}:{port}"
-                # iconurl was already fetched and cached before this function was called
                 raw_favicon = s.get('iconurl')
                 if raw_favicon:
-                    # Rewrite local/private hosts to base_host so any client can load the icon
-                    _LOCAL = re.compile(r'^(localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)$')
-                    def _rewrite_host(m):
-                        host = m.group(2)
-                        return m.group(1) + (base_host if _LOCAL.match(host) else host)
-                    favicon_url = re.sub(r'(https?://)([^/:]+)', _rewrite_host, raw_favicon, count=1)
+                    from urllib.parse import quote
+                    favicon_url = f"/proxy?url={quote(raw_favicon, safe='')}"
                 proto_badge = protocol.upper()
             else:
                 # Unknown protocol — offer both
@@ -633,6 +631,38 @@ class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split('?')[0]
 
+        # ── Icon proxy (avoids mixed-content for http:// icon URLs) ───
+        if path == '/proxy':
+            from urllib.parse import parse_qs, urlparse, unquote
+            qs = parse_qs(urlparse(self.path).query)
+            target = unquote(qs.get('url', [''])[0])
+            if not target:
+                self.send_response(400); self.end_headers(); return
+            try:
+                url_hash = hashlib.sha256(target.encode()).hexdigest()
+                data_path = os.path.join(ICON_CACHE_DIR, url_hash + '.dat')
+                meta_path = os.path.join(ICON_CACHE_DIR, url_hash + '.txt')
+
+                if os.path.exists(data_path) and os.path.exists(meta_path):
+                    content_type = open(meta_path).read().strip()
+                    data = open(data_path, 'rb').read()
+                else:
+                    r = requests.get(target, timeout=3, verify=False)
+                    content_type = r.headers.get('Content-Type', 'image/x-icon')
+                    data = r.content
+                    open(meta_path, 'w').write(content_type)
+                    open(data_path, 'wb').write(data)
+
+                self.send_response(200)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'public, max-age=31536000, immutable')
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception:
+                self.send_response(502); self.end_headers()
+            return
+
         # ── PWA static assets ──────────────────────────────────────
         if path == '/manifest.json':
             self._respond(MANIFEST_JSON, 'application/manifest+json')
@@ -683,8 +713,42 @@ class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
         except (ConnectionAbortedError, BrokenPipeError) as e:
             print(f"[{self.log_date_time_string()}] Connection dropped by {self.client_address[0]}: {e}")
 
+    def do_HEAD(self):
+        """Respond to HEAD requests with headers only — used for offline detection."""
+        path = self.path.split('?')[0]
+        if path == '/proxy':
+            self.send_response(200)
+        elif path in ('/manifest.json', '/service-worker.js', '/icon.svg', '/'):
+            self.send_response(200)
+        else:
+            self.send_response(404)
+        self.send_header('Cache-Control', 'no-cache')
+        self.end_headers()
+
     def log_message(self, format, *args):
-        print(f"[{self.log_date_time_string()}] Served dynamic list to {self.client_address[0]}")
+        method = self.command
+        path   = self.path
+        client = self.client_address[0]
+        code   = args[1] if len(args) > 1 else '?'
+
+        # Suppress noisy assets from the log
+        if any(path.startswith(p) for p in ('/service-worker.js', '/manifest.json', '/icon.svg')):
+            return
+        if method == 'HEAD':
+            return
+
+        if path == '/':
+            desc = 'page'
+        elif path.startswith('/proxy'):
+            from urllib.parse import parse_qs, urlparse, unquote
+            url = unquote(parse_qs(urlparse(path).query).get('url', ['?'])[0])
+            cached = os.path.exists(os.path.join(ICON_CACHE_DIR,
+                hashlib.sha256(url.encode()).hexdigest() + '.dat'))
+            desc = f"icon ({'disk' if cached else 'fetch'}) {url}"
+        else:
+            desc = path
+
+        print(f"[{self.log_date_time_string()}] {client} {method} {code} {desc}")
 
     def _respond(self, body, content_type):
         encoded = body.encode('utf-8')
