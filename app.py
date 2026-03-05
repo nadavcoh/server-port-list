@@ -710,9 +710,9 @@ if __name__ == "__main__":
         exit(1)
 
     try:
-        if not os.path.exists(args.cert) or not os.path.exists(args.key):
-            print(f"\nERROR: Certificate files not found. Specify with --cert and --key.")
-            exit(1)
+        # if not os.path.exists(args.cert) or not os.path.exists(args.key):
+        #     print(f"\nERROR: Certificate files not found. Specify with --cert and --key.")
+        #     exit(1)
 
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(args.cert, args.key)
