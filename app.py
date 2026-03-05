@@ -700,8 +700,8 @@ class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='App Launcher - HTTPS server')
-    parser.add_argument('--cert', default='', help='Path to TLS certificate file (default: cert.pem)')
-    parser.add_argument('--key',  default='',  help='Path to TLS private key file (default: key.pem)')
+    parser.add_argument('--cert', default='cert.pem', help='Path to TLS certificate file (default: cert.pem)')
+    parser.add_argument('--key',  default='key.pem',  help='Path to TLS private key file (default: key.pem)')
     parser.add_argument('--port', type=int, default=PORT, help=f'Port to listen on (default: {PORT})')
     args = parser.parse_args()
 
@@ -710,9 +710,9 @@ if __name__ == "__main__":
         exit(1)
 
     try:
-        # if not os.path.exists(args.cert) or not os.path.exists(args.key):
-        #     print(f"\nERROR: Certificate files not found. Specify with --cert and --key.")
-        #     exit(1)
+        if not os.path.exists(args.cert) or not os.path.exists(args.key):
+            print(f"\nERROR: Certificate files not found. Specify with --cert and --key.")
+            exit(1)
 
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(args.cert, args.key)
