@@ -13,6 +13,76 @@ PORT = 80
 ANNOTATIONS_FILE = 'annotations.csv'
 CSV_KEY_FIELDS = ['process', 'port', 'cmdline', 'cwd']
 CONFIG_PROCESS_NAME = '##CONFIG##'
+CACHE_NAME = 'app-launcher-v1'
+
+MANIFEST_JSON = """{
+  "name": "App Launcher",
+  "short_name": "Launcher",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f0f13",
+  "theme_color": "#0f0f13",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}"""
+
+ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#0f0f13"/>
+  <rect x="80"  y="80"  width="140" height="140" rx="28" fill="#4a4aff"/>
+  <rect x="292" y="80"  width="140" height="140" rx="28" fill="#9b59b6"/>
+  <rect x="80"  y="292" width="140" height="140" rx="28" fill="#9b59b6"/>
+  <rect x="292" y="292" width="140" height="140" rx="28" fill="#4a4aff"/>
+</svg>"""
+
+SERVICE_WORKER_JS = """
+const CACHE = 'app-launcher-v1';
+
+self.addEventListener('install', event => { self.skipWaiting(); });
+self.addEventListener('activate', event => { event.waitUntil(clients.claim()); });
+
+// Cache-first: serve from cache immediately, update cache in background
+self.addEventListener('fetch', event => {
+  if (event.request.method !== 'GET') return;
+
+  // For icon images (potentially cross-origin), use no-cors so they can be cached
+  const isIcon = event.request.destination === 'image'
+    || /\.(ico|png|svg|webp|jpg|jpeg)$/i.test(new URL(event.request.url).pathname);
+
+  const req = isIcon
+    ? new Request(event.request.url, { mode: 'no-cors', credentials: 'omit' })
+    : event.request;
+
+  event.respondWith(
+    caches.open(CACHE).then(cache =>
+      cache.match(req).then(cached => {
+        if (cached) return cached;
+        // Not in cache yet — fetch, store, and return
+        return fetch(req).then(response => {
+          if (response.ok || response.type === 'opaque') {
+            cache.put(req, response.clone());
+          }
+          return response;
+        });
+      })
+    )
+  );
+});
+
+// Manual cache clear triggered from the page via postMessage({action:'clearCache'})
+self.addEventListener('message', event => {
+  if (event.data && event.data.action === 'clearCache') {
+    caches.delete(CACHE).then(() => {
+      event.source.postMessage({action: 'cacheCleared'});
+    });
+  }
+});
+"""
 
 def get_key(server_dict):
     """Creates a stable key tuple from a server dictionary."""
@@ -42,7 +112,7 @@ def save_servers_to_csv(config, servers):
     try:
         with open(ANNOTATIONS_FILE, mode='w', newline='', encoding='utf-8') as csvfile:
             # Add new control fields to the header
-            fieldnames = ['process', 'pid', 'cmdline', 'cwd', 'ip', 'port', 'annotation', 'hidden', 'protocol', 'iconurl']
+            fieldnames = ['process', 'pid', 'cmdline', 'cwd', 'ip', 'port', 'annotation', 'hidden', 'protocol', 'iconurl', 'pagetitle']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
             
@@ -79,14 +149,10 @@ def get_running_servers():
                 servers.append({'ip': conn.laddr.ip, 'port': str(conn.laddr.port), 'pid': str(conn.pid), 'process': process_name, 'cmdline': cmdline, 'cwd': cwd})
     return servers
 
-def get_favicon_url(link):
+def fetch_page_info(link):
     """
-    Attempts to find the largest icon URL for a given server link.
-    Strategy:
-      1. Fetch the page HTML and parse all <link rel="icon|apple-touch-icon|..."> tags.
-         Pick the one with the largest declared size (e.g. sizes="192x192").
-      2. Fall back to /favicon.ico if no <link> icons found.
-      3. Fall back to Google's favicon service as a last resort.
+    Fetches a server's page and extracts (favicon_url, page_title).
+    Returns (None, None) if unreachable.
     """
     def _parse_size(sizes_attr):
         """Return the largest dimension integer from a sizes attribute like '32x32 64x64'."""
@@ -116,8 +182,11 @@ def get_favicon_url(link):
         response = requests.get(link, timeout=2, allow_redirects=True, verify=False)
         if response.status_code == 200:
             page_html = response.text
-            # Use the final URL after any redirects as the base for resolving relative hrefs
             final_base = response.url
+
+            # Extract page title
+            title_match = re.search(r'<title[^>]*>([^<]+)</title>', page_html, re.IGNORECASE)
+            page_title = title_match.group(1).strip() if title_match else None
 
             full_link_tags = re.findall(r'<link\b[^>]*>', page_html, re.IGNORECASE)
 
@@ -145,7 +214,7 @@ def get_favicon_url(link):
                     best_url = _make_absolute(href, final_base)
 
             if best_url:
-                return best_url
+                return best_url, page_title
     except requests.RequestException:
         pass
 
@@ -154,7 +223,7 @@ def get_favicon_url(link):
         favicon_url = f"{link}/favicon.ico"
         response = requests.get(favicon_url, timeout=1, verify=False)
         if response.status_code == 200 and response.content:
-            return favicon_url
+            return favicon_url, None
     except requests.RequestException:
         pass
 
@@ -164,18 +233,18 @@ def get_favicon_url(link):
         google_favicon_url = f"https://www.google.com/s2/favicons?sz=64&domain={domain}"
         response = requests.get(google_favicon_url, timeout=1, verify=False)
         if response.status_code == 200 and response.content:
-            return google_favicon_url
+            return google_favicon_url, None
     except requests.RequestException:
         pass
 
-    return None
+    return None, None
 
 def fetch_icons_for_servers(servers):
-    """Fetches and caches iconurl for any running server that doesn't have one yet."""
+    """Fetches and caches iconurl and pagetitle for any running server that doesn't have them yet."""
     for s in servers:
         if s.get('hidden', '').lower() == 'true':
             continue
-        if s.get('iconurl'):
+        if s.get('iconurl') and s.get('pagetitle'):
             continue
         if s.get('status') != 'Running':
             continue
@@ -184,9 +253,11 @@ def fetch_icons_for_servers(servers):
             continue
         port = s.get('port', '')
         fetch_link = f"{protocol}://localhost:{port}"
-        favicon_url = get_favicon_url(fetch_link)
+        favicon_url, page_title = fetch_page_info(fetch_link)
         if favicon_url:
             s['iconurl'] = favicon_url
+        if page_title and not s.get('pagetitle'):
+            s['pagetitle'] = page_title
 
 def generate_html(config, servers, request_host):
     """Renders servers as a visual app-picker / home-screen grid."""
@@ -199,7 +270,7 @@ def generate_html(config, servers, request_host):
         port     = s.get('port', '')
         protocol = s.get('protocol', '').lower()
         ip       = s.get('ip', '')
-        label    = html.escape(s.get('annotation') or s.get('process', 'Unknown'))
+        label    = html.escape(s.get('annotation') or s.get('pagetitle') or s.get('process', 'Unknown'))
         process  = html.escape(s.get('process', ''))
         pid      = html.escape(s.get('pid', ''))
         cmdline  = html.escape(s.get('cmdline', ''))
@@ -289,6 +360,14 @@ def generate_html(config, servers, request_host):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>App Launcher</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0f0f13">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="App Launcher">
+<link rel="apple-touch-icon" href="/icon.svg">
 <style>
   *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
 
@@ -465,17 +544,76 @@ def generate_html(config, servers, request_host):
     text-align: center;
   }}
   .hint code {{ color: #555; }}
+
+  /* ── offline banner ── */
+  #offline-banner {{
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    background: #7f1d1d;
+    color: #fecaca;
+    text-align: center;
+    font-size: .8rem;
+    padding: 8px 16px;
+    z-index: 999;
+  }}
+  body.offline #offline-banner {{ display: block; }}
+  body.offline {{ padding-top: 68px; }}
+
+  /* ── refresh button ── */
+  .refresh-btn {{
+    margin-left: auto;
+    background: none;
+    border: 1px solid #2a2a38;
+    border-radius: 8px;
+    color: #555;
+    font-size: .75rem;
+    padding: 5px 10px;
+    cursor: pointer;
+    transition: color .15s, border-color .15s;
+  }}
+  .refresh-btn:hover {{ color: #aaa; border-color: #4a4aff44; }}
+  .refresh-btn.clearing {{ color: #4a4aff; }}
 </style>
 </head>
 <body>
+<div id="offline-banner">⚠ Server unreachable — showing cached version</div>
 <header>
   <h1>App Launcher</h1>
   <span>edit <code>{ANNOTATIONS_FILE}</code> to annotate &amp; hide entries</span>
+  <button class="refresh-btn" id="refresh-btn" title="Clear cache and reload">↺ Clear cache</button>
 </header>
 <div class="grid">
 {cards_html}
 </div>
 <p class="hint">Tip: set <code>annotation</code> for a friendly name · set <code>protocol</code> to http or https to make a card clickable · set <code>hidden</code> to true to suppress an entry</p>
+
+<script>
+if ('serviceWorker' in navigator) {{
+  navigator.serviceWorker.register('/service-worker.js');
+
+  // Show offline banner when served from cache
+  navigator.serviceWorker.ready.then(() => {{
+    fetch('/', {{ method: 'HEAD', cache: 'no-store' }})
+      .catch(() => document.body.classList.add('offline'));
+  }});
+
+  // Listen for cache-cleared confirmation then reload
+  navigator.serviceWorker.addEventListener('message', e => {{
+    if (e.data && e.data.action === 'cacheCleared') location.reload();
+  }});
+}}
+
+document.getElementById('refresh-btn').addEventListener('click', function() {{
+  this.textContent = '↺ Clearing…';
+  this.classList.add('clearing');
+  if (navigator.serviceWorker.controller) {{
+    navigator.serviceWorker.controller.postMessage({{ action: 'clearCache' }});
+  }} else {{
+    location.reload();
+  }}
+}});
+</script>
 </body>
 </html>"""
 
@@ -485,12 +623,25 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        path = self.path.split('?')[0]
+
+        # ── PWA static assets ──────────────────────────────────────
+        if path == '/manifest.json':
+            self._respond(MANIFEST_JSON, 'application/manifest+json')
+            return
+        if path == '/service-worker.js':
+            self._respond(SERVICE_WORKER_JS, 'application/javascript')
+            return
+        if path == '/icon.svg':
+            self._respond(ICON_SVG, 'image/svg+xml')
+            return
+
+        # ── Main page ──────────────────────────────────────────────
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        
+
         host_header = self.headers.get('Host', 'localhost')
-        
         config, all_known_servers = load_config_and_servers_from_csv()
         
         for key in all_known_servers:
@@ -526,6 +677,18 @@ class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         print(f"[{self.log_date_time_string()}] Served dynamic list to {self.client_address[0]}")
+
+    def _respond(self, body, content_type):
+        encoded = body.encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(encoded)))
+        self.send_header('Cache-Control', 'no-cache')
+        self.end_headers()
+        try:
+            self.wfile.write(encoded)
+        except (ConnectionAbortedError, BrokenPipeError) as e:
+            print(f"[{self.log_date_time_string()}] Connection dropped by {self.client_address[0]}: {e}")
 
 if __name__ == "__main__":
     if 'psutil' not in globals():
