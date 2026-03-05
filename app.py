@@ -700,7 +700,7 @@ class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
         # Filter out hidden rows BEFORE sorting and displaying
         final_server_list = [s for s in all_known_servers.values() if s.get('hidden', '').lower() != 'true']
         
-        final_server_list.sort(key=lambda s: (not s.get('annotation'), int(s.get('port', 0))))
+        final_server_list.sort(key=lambda s: int(s.get('port', 0)))
 
         # Fetch missing icons BEFORE saving so iconurl gets persisted to CSV
         fetch_icons_for_servers(final_server_list)
