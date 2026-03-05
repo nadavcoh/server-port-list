@@ -700,8 +700,8 @@ class DynamicServerHandler(http.server.BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='App Launcher - HTTPS server')
-    parser.add_argument('--cert', default='cert.pem', help='Path to TLS certificate file (default: cert.pem)')
-    parser.add_argument('--key',  default='key.pem',  help='Path to TLS private key file (default: key.pem)')
+    parser.add_argument('--cert', default='', help='Path to TLS certificate file (default: cert.pem)')
+    parser.add_argument('--key',  default='',  help='Path to TLS private key file (default: key.pem)')
     parser.add_argument('--port', type=int, default=PORT, help=f'Port to listen on (default: {PORT})')
     args = parser.parse_args()
 
